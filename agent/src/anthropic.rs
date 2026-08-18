@@ -22,7 +22,7 @@ pub struct Message {
 #[derive(Debug, Clone)]
 pub enum StreamKind {
     TextDelta(String),
-    ToolUse { id: String, name: String, input: Value },
+    ToolUse { name: String, input: Value },
     Error(String),
 }
 
@@ -167,7 +167,6 @@ fn handle_block(
             if let Some(mut t) = cur_tool.take() {
                 t.input = serde_json::from_str(json_acc).unwrap_or(json!({}));
                 on_event(StreamKind::ToolUse {
-                    id: t.id.clone(),
                     name: t.name.clone(),
                     input: t.input.clone(),
                 });

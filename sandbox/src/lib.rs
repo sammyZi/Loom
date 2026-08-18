@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use core::{CommandOutput, WorkspaceRoot};
+use ide_core::{CommandOutput, WorkspaceRoot};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,4 +75,14 @@ pub fn passthrough_env() -> Vec<(String, String)> {
     KEEP.iter()
         .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_string(), v)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn network_env_points_at_discard() {
+        let env = super::deny_network_env();
+        let https = env.iter().find(|(k, _)| k == "HTTPS_PROXY").unwrap();
+        assert_eq!(https.1, "http://127.0.0.1:9");
+    }
 }

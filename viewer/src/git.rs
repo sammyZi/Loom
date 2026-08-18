@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use core::{GitFileStatus, GitStatus, WorkspaceRoot};
+use ide_core::{GitFileStatus, GitStatus, WorkspaceRoot};
 use git2::{DiffOptions, Repository, StatusOptions};
 
 pub fn status(ws: &WorkspaceRoot) -> Result<GitStatus> {

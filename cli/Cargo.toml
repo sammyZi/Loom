@@ -11,7 +11,7 @@ path = "src/main.rs"
 agent = { path = "../agent" }
 anyhow.workspace = true
 axum.workspace = true
-core = { path = "../core" }
+ide_core = { path = "../core" }
 futures-util.workspace = true
 mime_guess.workspace = true
 notify.workspace = true

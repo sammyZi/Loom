@@ -5,7 +5,8 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-core = { path = "../core" }
+ide_core = { path = "../core" }
 git2.workspace = true
 notify.workspace = true
 serde.workspace = true
+tokio.workspace = true

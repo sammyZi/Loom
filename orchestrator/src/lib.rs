@@ -1,6 +1,6 @@
 use agent::{run_agent, ToolRegistry};
 use anyhow::Result;
-use core::{AgentEvent, AgentRole, WorkspaceRoot};
+use ide_core::{AgentEvent, AgentRole, WorkspaceRoot};
 use sandbox::Sandbox;
 use std::sync::Arc;
 use tokio::sync::broadcast;

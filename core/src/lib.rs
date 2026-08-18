@@ -11,6 +11,7 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     ".idea",
     ".vscode",
+    ".ide-ai-tmp",
 ];
 
 #[derive(Clone, Debug)]

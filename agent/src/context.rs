@@ -1,3 +1,4 @@
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
 const MAX_CHARS: usize = 24_000;
@@ -37,8 +38,8 @@ fn rust_outline(src: &str) -> Option<String> {
     .ok()?;
     let mut cursor = QueryCursor::new();
     let mut names = Vec::new();
-    let matches: Vec<_> = cursor.matches(&q, tree.root_node(), src.as_bytes()).collect();
-    for m in matches {
+    let mut matches = cursor.matches(&q, tree.root_node(), src.as_bytes());
+    while let Some(m) = matches.next() {
         for cap in m.captures {
             if let Ok(t) = cap.node.utf8_text(src.as_bytes()) {
                 let start = cap.node.start_position().row + 1;

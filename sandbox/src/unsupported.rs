@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use core::{CommandOutput, WorkspaceRoot};
+use ide_core::{CommandOutput, WorkspaceRoot};
 use std::time::Duration;
 
 pub struct UnsupportedSandbox;

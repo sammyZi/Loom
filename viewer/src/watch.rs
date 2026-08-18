@@ -1,5 +1,5 @@
 use anyhow::Result;
-use core::{FsEvent, WorkspaceRoot};
+use ide_core::{FsEvent, WorkspaceRoot};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc;
 use tokio::sync::broadcast;

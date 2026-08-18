@@ -1,4 +1,4 @@
-use core::{AgentEvent, FsEvent, WorkspaceRoot};
+use ide_core::{AgentEvent, FsEvent, WorkspaceRoot};
 use sandbox::{native, Sandbox};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};

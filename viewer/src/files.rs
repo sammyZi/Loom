@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use core::{FileNode, WorkspaceRoot};
+use ide_core::{FileNode, WorkspaceRoot};
 use std::fs;
 use std::path::Path;
 const MAX_NODES: usize = 8_000;

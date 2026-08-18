@@ -2,7 +2,7 @@ use crate::anthropic::{self, Message, StreamKind};
 use crate::compact;
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
-use core::{AgentEvent, AgentRole, WorkspaceRoot};
+use ide_core::{AgentEvent, AgentRole, WorkspaceRoot};
 use sandbox::Sandbox;
 use serde_json::json;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ pub async fn run_agent(
             StreamKind::TextDelta(t) => {
                 let _ = ev.send(AgentEvent::Token { text: t });
             }
-            StreamKind::ToolUse { name, input, .. } => {
+            StreamKind::ToolUse { name, input } => {
                 let _ = ev.send(AgentEvent::ToolCall { name, input });
             }
             StreamKind::Error(message) => {
@@ -105,6 +105,7 @@ pub async fn run_agent(
             content: json!(results),
         });
     }
+    let _ = last_text;
     anyhow::bail!("tool loop limit reached")
 }
 

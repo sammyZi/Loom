@@ -6,10 +6,10 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
-use core::{AgentEvent, FsEvent, WorkspaceRoot};
+use ide_core::{AgentEvent, WorkspaceRoot};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -218,7 +218,3 @@ async fn pump_ws<T: serde::Serialize + Clone + Send + 'static>(
 fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
 }
-
-// silence unused import in some axum versions
-#[allow(dead_code)]
-fn _fs(_: FsEvent) {}

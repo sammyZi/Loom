@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use core::{AgentEvent, CommandOutput, WorkspaceRoot};
+use ide_core::{AgentEvent, CommandOutput, WorkspaceRoot};
 use sandbox::Sandbox;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
