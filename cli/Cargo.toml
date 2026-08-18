@@ -28,3 +28,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 viewer = { path = "../viewer" }
 webbrowser.workspace = true
+dotenvy = "0.15"
+raw-window-handle = "0.6"
+
+[build-dependencies]
+embed-resource = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

@@ -51,9 +51,20 @@ export const api = {
     req(`/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`) as Promise<{ diff: string }>,
   commit: (message: string) =>
     req("/git/commit", { method: "POST", body: JSON.stringify({ message }) }),
-  runAgent: (prompt: string) =>
-    req("/agent/run", { method: "POST", body: JSON.stringify({ prompt }) }),
+  runAgent: (prompt: string, model: string) =>
+    req("/agent/run", { method: "POST", body: JSON.stringify({ prompt, model }) }),
   cancelAgent: () => req("/agent/cancel", { method: "POST" }),
+  shell: (cmd: string) =>
+    req("/shell/run", { method: "POST", body: JSON.stringify({ cmd }) }) as Promise<{
+      exit_code: number;
+      stdout: string;
+      stderr: string;
+    }>,
+  models: () =>
+    req("/agent/models") as Promise<{
+      models: { id: string; label: string; hint: string }[];
+      default: string;
+    }>,
 };
 
 export type FileNode = {
@@ -67,6 +78,7 @@ export type AgentEvent =
   | { type: "token"; text: string }
   | { type: "tool_call"; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string }
+  | { type: "think"; text: string }
   | { type: "diff"; path: string; diff: string }
   | { type: "status"; message: string }
   | { type: "done"; summary: string }

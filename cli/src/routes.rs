@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/workspace", get(workspace_get))
         .route("/workspace/pick", post(workspace_pick))
         .route("/workspace/open", post(workspace_open))
+        .route("/fs/list", get(fs_list))
         .route("/files/tree", get(files_tree))
         .route("/files/content", get(files_get).put(files_put))
         .route("/ws/files", get(ws_files))
@@ -28,6 +29,8 @@ pub fn router() -> Router<AppState> {
         .route("/git/commit", post(git_commit))
         .route("/agent/run", post(agent_run))
         .route("/agent/cancel", post(agent_cancel))
+        .route("/agent/models", get(agent_models))
+        .route("/shell/run", post(shell_run))
         .route("/ws/agent", get(ws_agent))
 }
 
@@ -39,7 +42,7 @@ async fn workspace_get(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 async fn workspace_pick(State(st): State<AppState>) -> impl IntoResponse {
-    let picked = tokio::task::spawn_blocking(|| rfd::FileDialog::new().pick_folder()).await;
+    let picked = tokio::task::spawn_blocking(crate::pick::pick_folder).await;
     match picked {
         Ok(Some(path)) => open_path(&st, path).await,
         Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "path": null }))).into_response(),
@@ -50,6 +53,18 @@ async fn workspace_pick(State(st): State<AppState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct OpenBody {
     path: String,
+}
+
+async fn fs_list(Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    match viewer::list_dir(q.get("path").map(|s| s.as_str())) {
+        Ok((path, parent, entries)) => Json(serde_json::json!({
+            "path": path,
+            "parent": parent,
+            "entries": entries,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
 }
 
 async fn workspace_open(State(st): State<AppState>, Json(body): Json<OpenBody>) -> impl IntoResponse {
@@ -151,6 +166,15 @@ async fn git_commit(State(st): State<AppState>, Json(body): Json<CommitBody>) ->
 #[derive(Deserialize)]
 struct RunBody {
     prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+async fn agent_models() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "models": agent::model_catalog(),
+        "default": agent::normalize_model(""),
+    }))
 }
 
 async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> impl IntoResponse {
@@ -161,12 +185,14 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
     if body.prompt.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "prompt required");
     }
+    let model = agent::normalize_model(body.model.as_deref().unwrap_or("")).to_string();
     let cancel = CancellationToken::new();
     *st.cancel.lock().await = Some(cancel.clone());
     let sandbox = st.sandbox.clone();
     let events = st.agent_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = orchestrator::run_task(body.prompt, ws, sandbox, events.clone(), cancel).await
+        if let Err(e) =
+            orchestrator::run_task(body.prompt, model, ws, sandbox, events.clone(), cancel).await
         {
             let _ = events.send(AgentEvent::Error {
                 message: e.to_string(),
@@ -181,6 +207,48 @@ async fn agent_cancel(State(st): State<AppState>) -> impl IntoResponse {
         c.cancel();
     }
     Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct ShellBody {
+    cmd: String,
+}
+
+async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> impl IntoResponse {
+    let ws = match st.require_ws().await {
+        Ok(w) => w,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    let cmd = body.cmd.trim().to_string();
+    if cmd.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "cmd required");
+    }
+    let sandbox = st.sandbox.clone();
+    let run = tokio::task::spawn(async move {
+        #[cfg(windows)]
+        {
+            sandbox
+                .run(&ws, "cmd", &["/C".into(), cmd], std::time::Duration::from_secs(60))
+                .await
+        }
+        #[cfg(not(windows))]
+        {
+            sandbox
+                .run(&ws, "sh", &["-lc".into(), cmd], std::time::Duration::from_secs(60))
+                .await
+        }
+    })
+    .await;
+    match run {
+        Ok(Ok(out)) => Json(serde_json::json!({
+            "exit_code": out.exit_code,
+            "stdout": out.stdout,
+            "stderr": out.stderr,
+        }))
+        .into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 async fn ws_files(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl IntoResponse {

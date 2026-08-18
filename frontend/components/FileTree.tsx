@@ -1,6 +1,7 @@
 "use client";
 
 import { type FileNode } from "@/lib/api";
+import { useState } from "react";
 
 export function FileTree({
   tree,
@@ -11,7 +12,7 @@ export function FileTree({
   active: string | null;
   onOpen: (path: string) => void;
 }) {
-  if (!tree) return <div className="scroll" />;
+  if (!tree) return <div className="git-empty">No files</div>;
   return (
     <div className="scroll">
       <ul className="tree">
@@ -32,11 +33,17 @@ function Node({
   onOpen: (path: string) => void;
   root?: boolean;
 }) {
+  const [open, setOpen] = useState(true);
   if (node.is_dir) {
     return (
       <li>
-        {!root && <span>{node.name}/</span>}
-        {node.children && (
+        {!root && (
+          <button className="row folder" onClick={() => setOpen((v) => !v)}>
+            <span className="chev">{open ? "▾" : "▸"}</span>
+            {node.name}
+          </button>
+        )}
+        {open && node.children && (
           <ul>
             {node.children.map((c) => (
               <Node key={c.path || c.name} node={c} active={active} onOpen={onOpen} />
@@ -48,7 +55,8 @@ function Node({
   }
   return (
     <li>
-      <button className={active === node.path ? "active" : ""} onClick={() => onOpen(node.path)}>
+      <button className={`row ${active === node.path ? "active" : ""}`} onClick={() => onOpen(node.path)}>
+        <span className="chev" />
         {node.name}
       </button>
     </li>

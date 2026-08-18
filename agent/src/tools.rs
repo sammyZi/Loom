@@ -46,6 +46,10 @@ impl ToolRegistry {
         }
     }
 
+    pub fn none() -> Self {
+        Self { tools: vec![] }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &dyn Tool> {
         self.tools.iter().map(|t| t.as_ref())
     }

@@ -1,10 +1,10 @@
-use crate::anthropic::{self, Message, StreamKind};
 use crate::compact;
+use crate::deepseek::{self, Message, StreamKind};
 use crate::tools::{ToolCtx, ToolRegistry};
 use anyhow::Result;
 use ide_core::{AgentEvent, AgentRole, WorkspaceRoot};
 use sandbox::Sandbox;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 pub async fn run_agent(
     role: AgentRole,
     prompt: String,
+    model: String,
     ws: WorkspaceRoot,
     sandbox: Arc<dyn Sandbox>,
     events: broadcast::Sender<AgentEvent>,
@@ -20,7 +21,7 @@ pub async fn run_agent(
     announce_done: bool,
 ) -> Result<String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()?;
     let schemas = tools.schemas();
     let ctx = ToolCtx {
@@ -28,10 +29,7 @@ pub async fn run_agent(
         sandbox,
         events: events.clone(),
     };
-    let mut messages = vec![Message {
-        role: "user".into(),
-        content: json!([{ "type": "text", "text": prompt }]),
-    }];
+    let mut messages = vec![Message::user_text(prompt)];
     let system = system_prompt(role);
     let mut last_text = String::new();
 
@@ -41,7 +39,8 @@ pub async fn run_agent(
         }
         compact::compact(&mut messages);
         let ev = events.clone();
-        let turn = anthropic::stream(&client, &system, &schemas, &messages, |k| match k {
+        let turn = deepseek::stream(&client, &model, &system, &schemas, &messages, |k| match k {
+            StreamKind::ThinkDelta(_) => {}
             StreamKind::TextDelta(t) => {
                 let _ = ev.send(AgentEvent::Token { text: t });
             }
@@ -64,46 +63,53 @@ pub async fn run_agent(
             return Ok(last_text);
         }
 
-        let mut assistant_content = Vec::new();
-        if !turn.text.is_empty() {
-            assistant_content.push(json!({"type":"text","text": turn.text}));
-        }
-        for t in &turn.tools {
-            assistant_content.push(json!({
-                "type": "tool_use",
-                "id": t.id,
-                "name": t.name,
-                "input": t.input,
-            }));
-        }
+        let tool_calls: Vec<_> = turn
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "id": t.id,
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "arguments": t.input.to_string(),
+                    }
+                })
+            })
+            .collect();
         messages.push(Message {
             role: "assistant".into(),
-            content: json!(assistant_content),
+            content: if last_text.is_empty() {
+                None
+            } else {
+                Some(json!(last_text))
+            },
+            tool_calls: Some(json!(tool_calls)),
+            tool_call_id: None,
         });
 
-        let mut results = Vec::new();
         for t in turn.tools {
             if cancel.is_cancelled() {
                 anyhow::bail!("cancelled");
             }
             let output = match tools.get(&t.name) {
-                Some(tool) => tool.call(&ctx, t.input, &cancel).await.unwrap_or_else(|e| e.to_string()),
+                Some(tool) => tool
+                    .call(&ctx, t.input, &cancel)
+                    .await
+                    .unwrap_or_else(|e| e.to_string()),
                 None => format!("unknown tool {}", t.name),
             };
             let _ = events.send(AgentEvent::ToolResult {
                 name: t.name.clone(),
                 output: output.clone(),
             });
-            results.push(json!({
-                "type": "tool_result",
-                "tool_use_id": t.id,
-                "content": output,
-            }));
+            messages.push(Message {
+                role: "tool".into(),
+                content: Some(Value::String(output)),
+                tool_calls: None,
+                tool_call_id: Some(t.id),
+            });
         }
-        messages.push(Message {
-            role: "user".into(),
-            content: json!(results),
-        });
     }
     let _ = last_text;
     anyhow::bail!("tool loop limit reached")
@@ -111,22 +117,25 @@ pub async fn run_agent(
 
 fn system_prompt(role: AgentRole) -> String {
     let common = "You are a coding agent. The user opened one local folder; that is the only workspace. \
-Use tools. Paths are relative to the workspace root. Never ask to run unsandboxed commands. \
-Edits must be minimal. When changing code, run check_code and run_tests before claiming done.";
+Paths are relative to the workspace root. Never ask to run unsandboxed commands. \
+Edits must be minimal. Never dump chain-of-thought, tool traces, or README paste into the user reply.";
     match role {
         AgentRole::Planner => format!(
-            "{common}\nYou are the planner. Read the repo as needed, then output a short numbered plan. \
-Do not edit files. Do not run tests unless needed to understand the repo."
+            "{common}\nYou are the planner. If the user is greeting or chatting, reply in one short sentence and stop — no tools, no plan. \
+Otherwise read the repo as needed, then output a short numbered plan. Do not edit files."
         ),
         AgentRole::Coder => format!(
             "{common}\nYou are the coder. Implement the given plan with edit_file. \
 Then check_code and run_tests. Fix failures. Reply with a short summary of files changed."
         ),
         AgentRole::Reviewer => format!(
-            "{common}\nYou are the reviewer. Inspect the diff via read_file and git-unaware file reads. \
+            "{common}\nYou are the reviewer. Inspect changed files with read_file. \
 Run check_code and run_tests. If tests/compiler fail, say REVISE and list exact fixes. \
 If they pass, say APPROVED and a one-line summary."
         ),
-        AgentRole::Single => common.into(),
+        AgentRole::Single => format!(
+            "{common}\nYou are chatting in the IDE. Reply like a person. \
+If they say hi or small-talk, greet them and ask what to work on. Do not use tools. Do not write a plan."
+        ),
     }
 }

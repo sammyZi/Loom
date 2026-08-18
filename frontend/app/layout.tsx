@@ -1,11 +1,25 @@
 import type { Metadata } from "next";
+import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-export const metadata: Metadata = { title: "ide-ai" };
+const sans = Inter({
+  subsets: ["latin"],
+  variable: "--font-sans",
+});
+
+const mono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+});
+
+export const metadata: Metadata = {
+  title: "IDE-AI",
+  description: "Local coding agent",
+};
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${sans.variable} ${sans.className} ${mono.variable}`}>
       <body>{children}</body>
     </html>
   );

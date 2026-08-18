@@ -116,6 +116,7 @@ pub enum AgentEvent {
     Token { text: String },
     ToolCall { name: String, input: serde_json::Value },
     ToolResult { name: String, output: String },
+    Think { text: String },
     Diff { path: String, diff: String },
     Status { message: String },
     Done { summary: String },

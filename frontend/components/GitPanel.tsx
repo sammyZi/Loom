@@ -25,24 +25,30 @@ export function GitPanel({
     }
   }
   return (
-    <div className="col" style={{ maxHeight: 220, borderTop: "1px solid var(--border)" }}>
-      <div className="head">Git {status ? `· ${status.branch}` : ""}</div>
+    <div className="git-wrap">
+      <div className="head">
+        <span>Source control {status ? `· ${status.branch}` : ""}</span>
+      </div>
       <div className="scroll">
         {status?.files.map((f) => (
           <div className="git-item" key={f.path} onClick={() => onSelect(f.path)}>
             <span>{f.path}</span>
-            <span className="status">{f.status}</span>
+            <span className={`st st-${f.status}`}>{f.status}</span>
           </div>
         ))}
-        {status && status.files.length === 0 && (
-          <div style={{ padding: 10, color: "var(--muted)", fontSize: 12 }}>clean</div>
-        )}
+        {status && status.files.length === 0 && <div className="git-empty">Working tree clean</div>}
       </div>
       <div className="commit">
-        <input value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="commit message" />
-        <button onClick={commit}>Commit</button>
+        <input value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="Commit message" />
+        <button className="btn btn-primary" onClick={commit}>
+          Commit
+        </button>
       </div>
-      {err && <div className="err" style={{ padding: "0 8px 8px" }}>{err}</div>}
+      {err && (
+        <div className="err" style={{ margin: "0 10px 10px" }}>
+          {err}
+        </div>
+      )}
     </div>
   );
 }

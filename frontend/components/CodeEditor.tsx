@@ -12,7 +12,7 @@ export function CodeEditor({
   onChange: (v: string) => void;
 }) {
   if (!path) {
-    return <div className="scroll" style={{ padding: 16, color: "var(--muted)" }}>Select a file</div>;
+    return <div className="editor-empty">Select a file from the tree</div>;
   }
   return (
     <Editor
@@ -22,7 +22,23 @@ export function CodeEditor({
       language={lang(path)}
       value={value}
       onChange={(v) => onChange(v ?? "")}
-      options={{ minimap: { enabled: false }, fontSize: 13, automaticLayout: true }}
+      options={{
+        minimap: { enabled: false },
+        fontSize: 13,
+        fontFamily: "JetBrains Mono, Consolas, ui-monospace, monospace",
+        automaticLayout: true,
+        padding: { top: 12 },
+        scrollBeyondLastLine: false,
+        renderLineHighlight: "gutter",
+        overviewRulerLanes: 0,
+        hideCursorInOverviewRuler: true,
+        scrollbar: {
+          verticalScrollbarSize: 8,
+          horizontalScrollbarSize: 8,
+          arrowSize: 0,
+          useShadows: false,
+        },
+      }}
     />
   );
 }
