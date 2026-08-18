@@ -1,5 +1,7 @@
 "use client";
 
+import { IconClone, IconFolder, IconSsh } from "@/components/Icons";
+import { baseName } from "@/lib/log";
 import { useEffect, useState } from "react";
 
 const RECENT_KEY = "ide-ai-recent";
@@ -7,9 +9,8 @@ const RECENT_KEY = "ide-ai-recent";
 export type Recent = { name: string; path: string };
 
 export function rememberRecent(path: string) {
-  const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
   const prev: Recent[] = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
-  const next = [{ name, path }, ...prev.filter((p) => p.path !== path)].slice(0, 12);
+  const next = [{ name: baseName(path), path }, ...prev.filter((p) => p.path !== path)].slice(0, 12);
   localStorage.setItem(RECENT_KEY, JSON.stringify(next));
 }
 
@@ -60,32 +61,5 @@ export function Welcome({
         </div>
       </div>
     </div>
-  );
-}
-
-function IconFolder() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden>
-      <path d="M3 8.5A2 2 0 0 1 5 6.5h4l2 2h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-    </svg>
-  );
-}
-
-function IconClone() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden>
-      <path d="M12 4v10" />
-      <path d="M8 10l4 4 4-4" />
-      <path d="M5 18h14" />
-    </svg>
-  );
-}
-
-function IconSsh() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden>
-      <rect x="5" y="5" width="14" height="14" rx="2" />
-      <path d="M12 8v5l3 2" />
-    </svg>
   );
 }

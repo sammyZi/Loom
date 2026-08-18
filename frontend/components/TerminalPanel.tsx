@@ -1,17 +1,27 @@
 "use client";
 
+import { IconClose, IconPlus } from "@/components/Icons";
 import { api } from "@/lib/api";
+import { errText } from "@/lib/log";
 import { useEffect, useRef, useState } from "react";
 
 type Term = { id: number; name: string; log: string };
 
 let nextId = 1;
 
-export function TerminalPanel() {
+export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const [terms, setTerms] = useState<Term[]>([{ id: 1, name: "Terminal 1", log: "" }]);
   const [active, setActive] = useState(1);
   const [cmd, setCmd] = useState("");
   const [busy, setBusy] = useState(false);
+  const logRef = useRef<HTMLPreElement>(null);
+
+  const current = terms.find((t) => t.id === active) || terms[0];
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [current?.log]);
 
   function add() {
     nextId += 1;
@@ -20,14 +30,18 @@ export function TerminalPanel() {
     setActive(t.id);
   }
 
-  function close() {
+  function closeTab() {
     if (terms.length <= 1) {
-      setTerms([{ ...terms[0], log: "" }]);
+      onClose();
       return;
     }
     const next = terms.filter((t) => t.id !== active);
     setTerms(next);
     setActive(next[next.length - 1].id);
+  }
+
+  function append(text: string) {
+    setTerms((prev) => prev.map((t) => (t.id === active ? { ...t, log: t.log + text } : t)));
   }
 
   async function run() {
@@ -37,25 +51,14 @@ export function TerminalPanel() {
     setBusy(true);
     append(`$ ${line}\n`);
     try {
-      const r = (await api.shell(line)) as { exit_code: number; stdout: string; stderr: string };
+      const r = await api.shell(line);
       append(`${r.stdout}${r.stderr}` || `(exit ${r.exit_code})\n`);
       if (r.exit_code !== 0) append(`exit ${r.exit_code}\n`);
     } catch (e) {
-      append(`${e instanceof Error ? e.message : String(e)}\n`);
+      append(`${errText(e)}\n`);
     }
     setBusy(false);
   }
-
-  function append(text: string) {
-    setTerms((prev) => prev.map((t) => (t.id === active ? { ...t, log: t.log + text } : t)));
-  }
-
-  const current = terms.find((t) => t.id === active) || terms[0];
-  const logRef = useRef<HTMLPreElement>(null);
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [current?.log]);
 
   return (
     <div className="term">
@@ -65,15 +68,17 @@ export function TerminalPanel() {
             {t.name}
           </button>
         ))}
-        <span className="spacer" />
-        <button className="term-btn" onClick={add} title="New terminal">
-          +
+        <button className="icon-btn" onClick={add} title="New terminal">
+          <IconPlus />
         </button>
-        <button className="term-btn" onClick={close} title={terms.length > 1 ? "Close terminal" : "Clear terminal"}>
-          ×
+        <span className="spacer" />
+        <button className="icon-btn" onClick={closeTab} title="Close">
+          <IconClose />
         </button>
       </div>
-      <pre className="term-log" ref={logRef}>{current?.log || " "}</pre>
+      <pre className="term-log" ref={logRef}>
+        {current?.log || " "}
+      </pre>
       <div className="term-in">
         <span>$</span>
         <input
