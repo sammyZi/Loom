@@ -1,0 +1,10 @@
+/target
+/frontend/node_modules
+/frontend/.next
+/frontend/out
+**/*.pdb
+.idea
+.vscode
+.env
+.env.*
+!.env.example

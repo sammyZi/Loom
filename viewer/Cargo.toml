@@ -1,0 +1,11 @@
+[package]
+name = "viewer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+core = { path = "../core" }
+git2.workspace = true
+notify.workspace = true
+serde.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "orchestrator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+agent = { path = "../agent" }
+core = { path = "../core" }
+sandbox = { path = "../sandbox" }
+tokio.workspace = true
+tokio-util.workspace = true
+viewer = { path = "../viewer" }
