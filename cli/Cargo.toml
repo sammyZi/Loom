@@ -17,6 +17,7 @@ mime_guess.workspace = true
 notify.workspace = true
 orchestrator = { path = "../orchestrator" }
 rfd.workspace = true
+rusqlite.workspace = true
 rust-embed.workspace = true
 sandbox = { path = "../sandbox" }
 serde.workspace = true

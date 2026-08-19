@@ -1,10 +1,16 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
+import { Inter, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 const sans = Inter({
   subsets: ["latin"],
   variable: "--font-sans",
+});
+
+const display = Instrument_Serif({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-display",
 });
 
 const mono = JetBrains_Mono({
@@ -13,13 +19,13 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "IDE-AI",
+  title: "Loom",
   description: "Local coding agent",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${sans.variable} ${sans.className} ${mono.variable}`}>
+    <html lang="en" className={`${sans.variable} ${sans.className} ${display.variable} ${mono.variable}`}>
       <body>{children}</body>
     </html>
   );

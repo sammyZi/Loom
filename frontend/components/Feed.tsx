@@ -1,7 +1,8 @@
 "use client";
 
 import { IconMark } from "@/components/Icons";
-import { groupLog, mmss, type LogItem } from "@/lib/log";
+import { CopyButton, Markdown } from "@/components/Markdown";
+import { groupLog, secs, type LogItem } from "@/lib/log";
 import { useEffect, useRef } from "react";
 
 export function Feed({
@@ -10,12 +11,14 @@ export function Feed({
   busy,
   phase,
   elapsed,
+  tokens,
 }: {
   prompt: string;
   log: LogItem[];
   busy: boolean;
   phase: string;
   elapsed: number;
+  tokens: number;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -40,11 +43,12 @@ export function Feed({
         {!prompt && log.length === 0 && (
           <div className="feed-empty">
             <IconMark />
-            <p>Ask ide-ai to build a feature, fix a bug, or explain the code.</p>
+            <p>Ask Loom to build a feature, fix a bug, or explain the code.</p>
           </div>
         )}
 
-        {prompt && (
+        {/* Sessions saved before turns were logged keep their prompt outside the log. */}
+        {prompt && !log.some((l) => l.kind === "user") && (
           <div className="user-row">
             <div className="user-bubble">{prompt}</div>
           </div>
@@ -60,8 +64,15 @@ export function Feed({
 
         {busy && (
           <p className="working">
-            <span className="spinner" />
-            {phase || "Working"} · {mmss(elapsed)}
+            <span className="work-mark">
+              <IconMark />
+            </span>
+            <span className="work-stats">
+              {secs(elapsed)}
+              {tokens > 0 && ` · ${tokens.toLocaleString()} tokens`}
+              {" · "}
+              <span className="act-now">still thinking…</span>
+            </span>
           </p>
         )}
       </div>
@@ -70,6 +81,26 @@ export function Feed({
 }
 
 function Message({ item, live }: { item: LogItem; live: boolean }) {
+  if (item.kind === "user") {
+    return (
+      <div className="user-row">
+        <div className="user-bubble">{item.text}</div>
+      </div>
+    );
+  }
+  if (item.kind === "think") {
+    return (
+      <details className="work-group think-group">
+        <summary>
+          {live && <span className="act-live" />}
+          <span className={live ? "act-now" : ""}>Thinking</span>
+        </summary>
+        <div className="work-items">
+          <span className="act-think">{item.text}</span>
+        </div>
+      </details>
+    );
+  }
   if (item.kind === "err") {
     return (
       <div className="card">
@@ -78,19 +109,46 @@ function Message({ item, live }: { item: LogItem; live: boolean }) {
       </div>
     );
   }
-  return <div className={`event ${item.kind} ${live ? "live" : ""}`}>{item.text}</div>;
+  // The planner answers non-coding asks with a NO_CODE: marker the backend strips
+  // from its summary, but the raw tokens stream here first, so strip it on the way in.
+  // Agent replies are markdown; only the raw streaming caret needs plain text.
+  if (item.kind === "token" || item.kind === "ok") {
+    return (
+      <div className={`event ${item.kind} ${live ? "live" : ""}`}>
+        <Markdown text={item.text} />
+        {!live && (
+          <div className="event-actions">
+            <CopyButton text={item.text} />
+          </div>
+        )}
+      </div>
+    );
+  }
+  return <div className={`event ${item.kind}`}>{item.text}</div>;
 }
 
-function ToolLine({ items, running }: { items: string[]; running: boolean }) {
+function ToolLine({ items, running }: { items: LogItem[]; running: boolean }) {
+  const latest = items[items.length - 1];
   return (
     <details className="work-group">
       <summary>
-        {running ? "Running" : "Ran"} {items.length} command{items.length === 1 ? "" : "s"}
+        {running ? (
+          <>
+            <span className="act-live" />
+            <span className="act-now">
+              {latest.text}
+              {latest.detail ? ` ${latest.detail}` : ""}
+            </span>
+          </>
+        ) : (
+          `Ran ${items.length} command${items.length === 1 ? "" : "s"}`
+        )}
       </summary>
       <div className="work-items">
         {items.map((t, i) => (
-          <span className="badge tool" key={i}>
-            {t}
+          <span className="act" key={i}>
+            <span className="act-verb">{t.text}</span>
+            {t.detail && <code className="act-target">{t.detail}</code>}
           </span>
         ))}
       </div>

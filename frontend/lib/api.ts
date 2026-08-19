@@ -51,8 +51,8 @@ export const api = {
     req(`/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`) as Promise<{ diff: string }>,
   commit: (message: string) =>
     req("/git/commit", { method: "POST", body: JSON.stringify({ message }) }),
-  runAgent: (prompt: string, model: string) =>
-    req("/agent/run", { method: "POST", body: JSON.stringify({ prompt, model }) }),
+  runAgent: (prompt: string, model: string, mode: string, effort: string) =>
+    req("/agent/run", { method: "POST", body: JSON.stringify({ prompt, model, mode, effort }) }),
   cancelAgent: () => req("/agent/cancel", { method: "POST" }),
   shell: (cmd: string) =>
     req("/shell/run", { method: "POST", body: JSON.stringify({ cmd }) }) as Promise<{
@@ -81,5 +81,6 @@ export type AgentEvent =
   | { type: "think"; text: string }
   | { type: "diff"; path: string; diff: string }
   | { type: "status"; message: string }
+  | { type: "usage"; tokens: number }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };

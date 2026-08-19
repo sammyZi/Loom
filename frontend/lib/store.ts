@@ -1,59 +1,70 @@
+import { apiBase } from "./api";
 import type { LogItem } from "./log";
 
-const KEY = "ide-ai-sessions";
-const MAX = 40;
-
+/**
+ * Sessions live in SQLite in the Rust backend (see cli/src/db.rs), not in the
+ * browser. That is what makes history shared across ports, unbounded by the
+ * ~5MB localStorage quota, and durable across a browser cache clear.
+ */
 export type Session = {
   id: string;
   folder: string;
   title: string;
   log: LogItem[];
+  /** Last activity, epoch millis. */
   at: number;
+  /** Start time. List order uses this so rows never re-shuffle. */
+  created?: number;
+  archived?: boolean;
 };
 
-// ponytail: localStorage caps around 5MB; move to IndexedDB if long transcripts start getting dropped
-function read(): Session[] {
+async function call<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(`${apiBase()}/sessions${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", ...(init?.headers || {}) },
+  });
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  return (await r.json()) as T;
+}
+
+/** Every stored session across all projects, newest first. Archived are hidden. */
+export async function loadAllSessions(): Promise<Session[]> {
   try {
-    const all = JSON.parse(localStorage.getItem(KEY) || "[]") as Session[];
-    return Array.isArray(all) ? all : [];
+    const { sessions } = await call<{ sessions: Session[] }>("");
+    return sessions ?? [];
   } catch {
     return [];
   }
 }
 
-function write(all: Session[]): Session[] {
-  let next = all.sort((a, b) => b.at - a.at).slice(0, MAX);
-  // On quota errors keep dropping the oldest half until it fits; never throw at the caller,
-  // losing old history beats losing the run that just finished.
-  while (next.length) {
-    try {
-      localStorage.setItem(KEY, JSON.stringify(next));
-      return next;
-    } catch {
-      next = next.slice(0, Math.floor(next.length / 2));
-    }
-  }
+export async function saveSession(s: Session): Promise<void> {
+  await call("", { method: "PUT", body: JSON.stringify({ created: s.at, ...s }) });
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  await call(`/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function renameSession(id: string, title: string): Promise<void> {
+  const clean = title.trim();
+  if (!clean) return;
+  await call(`/${encodeURIComponent(id)}/rename`, {
+    method: "POST",
+    body: JSON.stringify({ title: clean }),
+  });
+}
+
+export async function archiveSession(id: string): Promise<void> {
+  await call(`/${encodeURIComponent(id)}/archive`, { method: "POST" });
+}
+
+export async function clearAllSessions(): Promise<void> {
+  await call("", { method: "DELETE" });
   try {
-    localStorage.setItem(KEY, "[]");
+    localStorage.removeItem("ide-ai-recent");
   } catch {
-    // storage unavailable entirely
+    // storage unavailable
   }
-  return [];
-}
-
-export function loadSessions(folder: string): Session[] {
-  return read().filter((s) => s.folder === folder);
-}
-
-export function saveSession(s: Session): Session[] {
-  const all = read().filter((x) => x.id !== s.id);
-  write([...all, s]);
-  return loadSessions(s.folder);
-}
-
-export function deleteSession(id: string, folder: string): Session[] {
-  write(read().filter((s) => s.id !== id));
-  return loadSessions(folder);
 }
 
 export function newSessionId() {

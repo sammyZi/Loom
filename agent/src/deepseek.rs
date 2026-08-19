@@ -16,6 +16,15 @@ pub fn catalog() -> Vec<Value> {
     ]
 }
 
+/// Clamp to the three levels DeepSeek documents; anything else falls back to medium.
+pub fn normalize_effort(s: &str) -> &'static str {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "high" => "high",
+        _ => "medium",
+    }
+}
+
 pub fn normalize_model(s: &str) -> &'static str {
     match s.trim() {
         "deepseek-v4-flash" | "flash" | "v4-flash" => FLASH,
@@ -59,6 +68,7 @@ impl Message {
 
 #[derive(Debug, Clone)]
 pub enum StreamKind {
+    Usage(u64),
     ThinkDelta(String),
     TextDelta(String),
     ToolUse { name: String, input: Value },
@@ -84,6 +94,7 @@ pub async fn stream(
     system: &str,
     tools: &[Value],
     messages: &[Message],
+    effort: &str,
     mut on_event: impl FnMut(StreamKind),
 ) -> Result<AssistantTurn> {
     let model = normalize_model(model);
@@ -109,7 +120,9 @@ pub async fn stream(
         })
         .collect();
 
-    let effort = if model == FLASH { "low" } else { "high" };
+    // DeepSeek V4 takes reasoning_effort = low | medium | high. Plain chat turns
+    // (no tools) stay on low regardless, since there is nothing to reason about.
+    let effort = normalize_effort(effort);
     let mut body = json!({
         "model": model,
         "messages": full_msgs,
@@ -117,6 +130,7 @@ pub async fn stream(
         "temperature": if openai_tools.is_empty() { 0.6 } else { 0.2 },
         "max_tokens": 8192,
         "reasoning_effort": if openai_tools.is_empty() { "low" } else { effort },
+        "stream_options": { "include_usage": true },
     });
     if !openai_tools.is_empty() {
         body["tools"] = json!(openai_tools);
@@ -207,6 +221,9 @@ fn handle_block(
         on_event(StreamKind::Error(msg.to_string()));
         anyhow::bail!(msg.to_string());
     }
+    if let Some(t) = v["usage"]["completion_tokens"].as_u64() {
+        on_event(StreamKind::Usage(t));
+    }
     let Some(choice) = v["choices"].as_array().and_then(|a| a.first()) else {
         return Ok(());
     };
@@ -248,5 +265,18 @@ mod tests {
         assert_eq!(super::normalize_model("deepseek-v4-pro"), super::PRO);
         assert_eq!(super::normalize_model(""), super::PRO);
         assert_eq!(super::catalog().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    #[test]
+    fn clamps_to_the_three_documented_levels() {
+        assert_eq!(super::normalize_effort("low"), "low");
+        assert_eq!(super::normalize_effort("HIGH"), "high");
+        assert_eq!(super::normalize_effort(" Medium "), "medium");
+        // anything unrecognised, including empty, falls back to medium
+        assert_eq!(super::normalize_effort(""), "medium");
+        assert_eq!(super::normalize_effort("max effort"), "medium");
     }
 }

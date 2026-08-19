@@ -119,6 +119,8 @@ pub enum AgentEvent {
     Think { text: String },
     Diff { path: String, diff: String },
     Status { message: String },
+    /// Completion tokens reported by the provider for one model call.
+    Usage { tokens: u64 },
     Done { summary: String },
     Error { message: String },
 }

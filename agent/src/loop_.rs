@@ -19,6 +19,7 @@ pub async fn run_agent(
     cancel: CancellationToken,
     tools: ToolRegistry,
     announce_done: bool,
+    effort: String,
 ) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -30,7 +31,7 @@ pub async fn run_agent(
         events: events.clone(),
     };
     let mut messages = vec![Message::user_text(prompt)];
-    let system = system_prompt(role);
+    let system = system_prompt(role, &ctx.ws);
     let mut last_text = String::new();
 
     for _ in 0..24 {
@@ -39,7 +40,10 @@ pub async fn run_agent(
         }
         compact::compact(&mut messages);
         let ev = events.clone();
-        let turn = deepseek::stream(&client, &model, &system, &schemas, &messages, |k| match k {
+        let turn = deepseek::stream(&client, &model, &system, &schemas, &messages, &effort, |k| match k {
+            StreamKind::Usage(tokens) => {
+                let _ = ev.send(AgentEvent::Usage { tokens });
+            }
             StreamKind::ThinkDelta(_) => {}
             StreamKind::TextDelta(t) => {
                 let _ = ev.send(AgentEvent::Token { text: t });
@@ -115,10 +119,18 @@ pub async fn run_agent(
     anyhow::bail!("tool loop limit reached")
 }
 
-fn system_prompt(role: AgentRole) -> String {
-    let common = "You are a coding agent. The user opened one local folder; that is the only workspace. \
-Paths are relative to the workspace root. Never ask to run unsandboxed commands. \
-Edits must be minimal. Never dump chain-of-thought, tool traces, or README paste into the user reply.";
+fn system_prompt(role: AgentRole, ws: &WorkspaceRoot) -> String {
+    // The orientation block matters: without it the agent guessed the stack from the
+    // tool names and described files that were never in the open folder.
+    let common = format!(
+        "You are a coding agent. The user opened one local folder; that is the only workspace. \
+Paths are relative to the workspace root. You CAN run commands with run_command: it is \
+sandboxed and waits for the command to finish, so it suits installs, builds, tests and one-shot \
+checks. A long-running process such as a dev server is killed when the call returns, so never \
+claim to have started one; give the user the exact command to run in the app terminal panel. \
+Edits must be minimal. Never dump chain-of-thought, tool traces, or README paste into the user reply.\n\n{}",
+        crate::project::summary(ws)
+    );
     match role {
         AgentRole::Planner => format!(
             "{common}\nYou are the planner. If the user is greeting or chatting, reply in one short sentence and stop — no tools, no plan. \

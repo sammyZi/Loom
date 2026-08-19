@@ -1,16 +1,25 @@
 "use client";
 
-import { Composer, type Attachment } from "@/components/Composer";
+import { Composer, MODEL_IDS, type SubmitMeta } from "@/components/Composer";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
-import { Sidebar } from "@/components/Sidebar";
+import { Sidebar, buildGroups } from "@/components/Sidebar";
 import { TerminalPanel } from "@/components/TerminalPanel";
 import { TopBar, type Panel } from "@/components/TopBar";
 import { Welcome, rememberRecent, type Recent } from "@/components/Welcome";
 import { api, type AgentEvent, wsBase } from "@/lib/api";
 import { baseName, countDiff, errText, formatEvent, mergeLog, type LogItem } from "@/lib/log";
-import { deleteSession, loadSessions, newSessionId, saveSession, type Session } from "@/lib/store";
+import {
+  archiveSession,
+  clearAllSessions,
+  deleteSession,
+  loadAllSessions,
+  newSessionId,
+  renameSession,
+  saveSession,
+  type Session,
+} from "@/lib/store";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const MODEL_KEY = "ide-ai-model";
@@ -25,22 +34,36 @@ export default function Page() {
   const [recent, setRecent] = useState<Recent[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // The folder a session belongs to, captured when it starts. Saving against the
+  // *current* workspace moved transcripts between projects whenever the folder
+  // changed while a run was still in flight.
+  const [sessionFolder, setSessionFolder] = useState<string | null>(null);
   const [log, setLog] = useState<LogItem[]>([]);
   const [promptShown, setPromptShown] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [attached, setAttached] = useState<Attachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState("");
   const [elapsed, setElapsed] = useState(0);
+  const [tokens, setTokens] = useState(0);
   const [model, setModel] = useState("deepseek-v4-pro");
   const [sideOpen, setSideOpen] = useState(true);
   const [panel, setPanel] = useState<Panel>("none");
+  const [maxed, setMaxed] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Lets the open-folder screen be shown on demand, not only when nothing is open.
+  const [showPicker, setShowPicker] = useState(false);
   const [err, setErr] = useState("");
 
   // latest values for the persist-on-finish effect, so it need not re-run per token
-  const live = useRef({ sessionId, promptShown, log, folder });
-  live.current = { sessionId, promptShown, log, folder };
+  // token accounting: exact totals from the provider, plus a live estimate
+  // The agent socket is broadcast to every connected client, so a run started in
+  // another window (or by a script hitting the API) used to drive this feed and
+  // flip it to "working" with no prompt from the user. Only follow our own run.
+  const myRun = useRef(false);
+  const exact = useRef(0);
+  const streamed = useRef(0);
+  const live = useRef({ sessionId, promptShown, log, sessionFolder });
+  live.current = { sessionId, promptShown, log, sessionFolder };
 
   useEffect(() => {
     const saved = localStorage.getItem(MODEL_KEY);
@@ -57,9 +80,13 @@ export default function Page() {
     }
   }
 
+  const reloadSessions = useCallback(async () => {
+    setSessions(await loadAllSessions());
+  }, []);
+
   useEffect(() => {
-    if (folder) setSessions(loadSessions(folder));
-  }, [folder]);
+    if (folder) reloadSessions();
+  }, [folder, reloadSessions]);
 
   useEffect(() => {
     if (!busy) return;
@@ -71,10 +98,12 @@ export default function Page() {
   // persist the transcript once a run settles
   useEffect(() => {
     if (busy) return;
-    const { sessionId: id, promptShown: t, log: items, folder: dir } = live.current;
+    const { sessionId: id, promptShown: t, log: items, sessionFolder: dir } = live.current;
     if (!id || !dir || items.length === 0) return;
-    setSessions(saveSession({ id, folder: dir, title: t || "Untitled", log: items, at: Date.now() }));
-  }, [busy]);
+    saveSession({ id, folder: dir, title: t || "Untitled", log: items, at: Date.now() })
+      .then(reloadSessions)
+      .catch(() => {});
+  }, [busy, reloadSessions]);
 
   const refresh = useCallback(async () => {
     const ws = await api.workspace();
@@ -104,13 +133,24 @@ export default function Page() {
     const agent = new WebSocket(`${wsBase()}/ws/agent`);
     agent.onmessage = (m) => {
       const ev = JSON.parse(m.data) as AgentEvent;
+      if (!myRun.current) return;
       if (ev.type === "status") {
         setBusy(true);
         setPhase(ev.message);
       }
       if (ev.type === "done" || ev.type === "error") {
+        myRun.current = false;
         setBusy(false);
         setPhase("");
+      }
+      if (ev.type === "usage") {
+        exact.current += ev.tokens;
+        streamed.current = 0;
+        setTokens(exact.current);
+      }
+      if (ev.type === "token" || ev.type === "think") {
+        streamed.current += ev.text.length;
+        setTokens(exact.current + Math.round(streamed.current / 4));
       }
       if (ev.type === "diff") refresh().catch(() => {});
       const line = formatEvent(ev);
@@ -131,7 +171,7 @@ export default function Page() {
     setLog([]);
     setPromptShown("");
     setSessionId(null);
-    setAttached([]);
+    setSessionFolder(null);
   }
 
   async function pick() {
@@ -142,6 +182,7 @@ export default function Page() {
       rememberRecent(r.path);
       loadRecent();
       newTask();
+      setShowPicker(false);
       await refresh();
     } catch (e) {
       setErr(errText(e));
@@ -155,27 +196,52 @@ export default function Page() {
       rememberRecent(path);
       loadRecent();
       newTask();
+      setShowPicker(false);
       await refresh();
     } catch (e) {
       setErr(errText(e));
     }
   }
 
-  async function run() {
+  async function run(text: string, meta: SubmitMeta) {
     setErr("");
-    if (!prompt.trim()) return;
-    const body = attached.length
-      ? `${attached.map((a) => `--- ${a.name} ---\n${a.text}`).join("\n\n")}\n\n${prompt}`
-      : prompt;
-    setPromptShown(prompt);
-    setLog([]);
-    setSessionId(newSessionId());
+    if (!text.trim() || busy) return;
+
+    const id = MODEL_IDS[meta.model] ?? "deepseek-v4-pro";
+    setModel(id);
+    localStorage.setItem(MODEL_KEY, id);
+
+    // The mode is a real request field, never a prompt preamble: prefixing the
+    // prompt defeated the backend's "is this just a greeting?" check and sent
+    // plain hellos through the whole planner/coder pipeline.
+    const mode = meta.mode || "Auto";
+    const effort = (meta.effort || "Medium").toLowerCase();
+    const names = meta.attachments.map((f) => f.name).join(", ");
+    const body = names ? [`Images attached in the UI: ${names}`, "", text].join("\n") : text;
+
+    // Continue the open session instead of starting a new one on every send.
+    // A fresh id is minted only when nothing is open (New task, or first message).
+    if (!sessionId) {
+      setSessionId(newSessionId());
+      setSessionFolder(folder);
+    }
+    // The session title stays the first message, so the sidebar name is stable.
+    if (!promptShown) setPromptShown(text);
+    setLog((prev) => [...prev, { kind: "user", text }]);
+    exact.current = 0;
+    streamed.current = 0;
+    setTokens(0);
+    myRun.current = true;
+    // Set busy BEFORE the request. Setting it after the await raced the websocket:
+    // a fast run could emit status+done first, and the late setBusy(true) re-latched
+    // it forever, so the run never "finished" and the transcript was never saved.
+    setBusy(true);
     try {
-      await api.runAgent(body, model);
+      await api.runAgent(body, id, mode, effort);
       setPrompt("");
-      setAttached([]);
-      setBusy(true);
     } catch (e) {
+      myRun.current = false;
+      setBusy(false);
       setErr(errText(e));
     }
   }
@@ -205,10 +271,14 @@ export default function Page() {
     setSideOpen(!sideOpen);
   }
 
-  if (!folder) {
+  if (!folder || showPicker) {
     return (
       <>
-        <Welcome onPick={pick} onOpenRecent={openRecent} />
+        <Welcome
+          onPick={pick}
+          onOpenRecent={openRecent}
+          onCancel={folder ? () => setShowPicker(false) : undefined}
+        />
         {err && <div className="welcome-err">{err}</div>}
       </>
     );
@@ -216,6 +286,9 @@ export default function Page() {
 
   const project = baseName(folder);
   const title = promptShown || "New task";
+  // PromptInput keeps its own model state and defaults to models[0],
+  // so put the remembered model first.
+  const models = model.includes("flash") ? ["Flash", "Pro"] : ["Pro", "Flash"];
 
   return (
     <div className="app">
@@ -224,22 +297,40 @@ export default function Page() {
           open={sideOpen}
           folder={folder}
           recent={recent}
-          sessions={sessions}
+          groups={buildGroups(folder, recent, sessions)}
           activeId={sessionId}
           title={title}
           busy={busy}
           onToggle={toggleSide}
           onNewTask={newTask}
-          onPick={pick}
+          onPick={() => setShowPicker(true)}
           onOpenRecent={openRecent}
           onLoadSession={(s) => {
             setSessionId(s.id);
+            setSessionFolder(s.folder);
             setPromptShown(s.title);
             setLog(s.log);
-            setAttached([]);
           }}
-          onDeleteSession={(id) => {
-            setSessions(deleteSession(id, folder));
+          onClearAll={async () => {
+            await clearAllSessions();
+            setSessions([]);
+            setRecent([]);
+            newTask();
+            setShowPicker(true);
+          }}
+          onDeleteSession={async (id) => {
+            await deleteSession(id);
+            await reloadSessions();
+            if (id === sessionId) newTask();
+          }}
+          onRenameSession={async (id, next) => {
+            await renameSession(id, next);
+            await reloadSessions();
+            if (id === sessionId) setPromptShown(next);
+          }}
+          onArchiveSession={async (id) => {
+            await archiveSession(id);
+            await reloadSessions();
             if (id === sessionId) newTask();
           }}
         />
@@ -256,36 +347,39 @@ export default function Page() {
             onCopyLink={copyLink}
           />
 
-          <Feed prompt={promptShown} log={log} busy={busy} phase={phase} elapsed={elapsed} />
+          <Feed
+            prompt={promptShown}
+            log={log}
+            busy={busy}
+            phase={phase}
+            elapsed={elapsed}
+            tokens={tokens}
+          />
 
           <div className="composer-wrap">
             <ContextBar project={project} git={git} stat={stat} onCommit={commit} />
             <Composer
               value={prompt}
-              model={model}
+              models={models}
               busy={busy}
-              attached={attached}
               onChange={setPrompt}
-              onModel={(id) => {
-                setModel(id);
-                localStorage.setItem(MODEL_KEY, id);
-              }}
-              onAttach={(files) =>
-                setAttached((prev) => [
-                  ...prev.filter((p) => !files.some((f) => f.name === p.name)),
-                  ...files,
-                ])
-              }
-              onRemove={(name) => setAttached((prev) => prev.filter((a) => a.name !== name))}
-              onRun={run}
+              onSubmit={run}
               onStop={() => api.cancelAgent()}
             />
             {err && <div className="err">{err}</div>}
           </div>
         </main>
 
-        <div className={`shell-wrap ${panel === "terminal" ? "" : "off"}`}>
-          <TerminalPanel onClose={() => setPanel("none")} />
+        <div className={`shell-wrap ${panel === "terminal" ? "" : "off"} ${maxed ? "maxed" : ""}`}>
+          <TerminalPanel
+            cwd={folder}
+            maxed={maxed}
+            onToggleMax={() => setMaxed((v) => !v)}
+            onClose={() => {
+              setPanel("none");
+              setMaxed(false);
+            }}
+          />
         </div>
         <div className={`shell-wrap ${panel === "diff" ? "" : "off"}`}>
           <DiffPanel diff={diff} onRefresh={() => refresh().catch(() => {})} />

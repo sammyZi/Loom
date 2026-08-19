@@ -6,7 +6,7 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use ide_core::{AgentEvent, WorkspaceRoot};
@@ -27,6 +27,10 @@ pub fn router() -> Router<AppState> {
         .route("/git/status", get(git_status))
         .route("/git/diff", get(git_diff))
         .route("/git/commit", post(git_commit))
+        .route("/sessions", get(sessions_list).put(sessions_upsert).delete(sessions_clear))
+        .route("/sessions/{id}", delete(sessions_delete))
+        .route("/sessions/{id}/rename", post(sessions_rename))
+        .route("/sessions/{id}/archive", post(sessions_archive))
         .route("/agent/run", post(agent_run))
         .route("/agent/cancel", post(agent_cancel))
         .route("/agent/models", get(agent_models))
@@ -163,11 +167,75 @@ async fn git_commit(State(st): State<AppState>, Json(body): Json<CommitBody>) ->
     }
 }
 
+async fn sessions_list(State(st): State<AppState>) -> impl IntoResponse {
+    match st.db.list() {
+        Ok(sessions) => Json(serde_json::json!({ "sessions": sessions })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn sessions_upsert(
+    State(st): State<AppState>,
+    Json(body): Json<crate::db::Session>,
+) -> impl IntoResponse {
+    match st.db.upsert(&body) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+async fn sessions_delete(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match st.db.delete(&id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    title: String,
+}
+
+async fn sessions_rename(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<RenameBody>,
+) -> impl IntoResponse {
+    match st.db.rename(&id, body.title.trim()) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+async fn sessions_archive(
+    State(st): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    match st.db.archive(&id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+async fn sessions_clear(State(st): State<AppState>) -> impl IntoResponse {
+    match st.db.clear() {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 #[derive(Deserialize)]
 struct RunBody {
     prompt: String,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 async fn agent_models() -> impl IntoResponse {
@@ -186,13 +254,25 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         return err(StatusCode::BAD_REQUEST, "prompt required");
     }
     let model = agent::normalize_model(body.model.as_deref().unwrap_or("")).to_string();
+    let mode = orchestrator::Mode::parse(body.mode.as_deref().unwrap_or(""));
+    let effort = agent::normalize_effort(body.effort.as_deref().unwrap_or("")).to_string();
     let cancel = CancellationToken::new();
     *st.cancel.lock().await = Some(cancel.clone());
     let sandbox = st.sandbox.clone();
     let events = st.agent_tx.clone();
     tokio::spawn(async move {
         if let Err(e) =
-            orchestrator::run_task(body.prompt, model, ws, sandbox, events.clone(), cancel).await
+            orchestrator::run_task(
+                body.prompt,
+                model,
+                mode,
+                effort,
+                ws,
+                sandbox,
+                events.clone(),
+                cancel,
+            )
+            .await
         {
             let _ = events.send(AgentEvent::Error {
                 message: e.to_string(),

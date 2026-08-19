@@ -1,127 +1,60 @@
 "use client";
 
-import { IconClip, IconClose } from "@/components/Icons";
-import { useRef } from "react";
+import { PromptInput } from "@/components/ui/ai-chat-input";
 
-export const MODELS = [
-  { id: "deepseek-v4-flash", label: "Flash" },
-  { id: "deepseek-v4-pro", label: "Pro" },
-] as const;
+/** Label shown in PromptInput -> model id the backend expects. */
+export const MODEL_IDS: Record<string, string> = {
+  Flash: "deepseek-v4-flash",
+  Pro: "deepseek-v4-pro",
+};
 
-/** Text kept per attached file. Bigger files are truncated so the prompt stays sane. */
-const MAX_CHARS = 200_000;
+export type SubmitMeta = { model: string; mode: string; effort: string; attachments: File[] };
 
-export type Attachment = { name: string; text: string; chars: number };
+/**
+ * Run modes, surfaced as their own dropdown in the composer.
+ * These strings are parsed by orchestrator::Mode::parse on the backend.
+ *   Auto    planner -> coder -> reviewer, agent may run commands
+ *   Plan    planner only, nothing is edited
+ *   Manual  one agent, one pass, no planner or reviewer
+ *   Approve agent has no shell; it lists commands for you to run
+ */
+export const MODES = ["Auto", "Plan", "Manual", "Approve"];
 
+/** DeepSeek V4 reasoning_effort levels, per the API docs. */
+export const EFFORTS = ["Low", "Medium", "High"];
+
+/**
+ * Adapter around the shadcn PromptInput: keeps components/ui untouched and
+ * translates its (value, meta) submit shape into the app's agent call.
+ */
 export function Composer({
   value,
-  model,
+  models,
   busy,
-  attached,
   onChange,
-  onModel,
-  onAttach,
-  onRemove,
-  onRun,
+  onSubmit,
   onStop,
 }: {
   value: string;
-  model: string;
+  models: string[];
   busy: boolean;
-  attached: Attachment[];
   onChange: (v: string) => void;
-  onModel: (id: string) => void;
-  onAttach: (files: Attachment[]) => void;
-  onRemove: (name: string) => void;
-  onRun: () => void;
+  onSubmit: (value: string, meta: SubmitMeta) => void;
   onStop: () => void;
 }) {
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  async function pickFiles(list: FileList | null) {
-    if (!list?.length) return;
-    const out: Attachment[] = [];
-    for (const f of Array.from(list)) {
-      const raw = await f.text();
-      if (raw.includes("\u0000")) continue; // skip binaries
-      out.push({ name: f.name, text: raw.slice(0, MAX_CHARS), chars: raw.length });
-    }
-    if (out.length) onAttach(out);
-    if (fileRef.current) fileRef.current.value = "";
-  }
-
   return (
-    <div className="composer">
-      {attached.length > 0 && (
-        <div className="attach-row">
-          {attached.map((a) => (
-            <span className="attach-chip" key={a.name}>
-              {a.name}
-              <em>{kb(a.chars)}</em>
-              <button onClick={() => onRemove(a.name)} title="Remove">
-                <IconClose />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      <textarea
+    <div className="composer-shell">
+      <PromptInput
         value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Ask ide-ai to build features, fix bugs, or work on your code."
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            onRun();
-          }
-        }}
+        onChange={onChange}
+        models={models}
+        busy={busy}
+        onStop={onStop}
+        modes={MODES}
+        efforts={EFFORTS}
+        onSubmit={onSubmit}
+        placeholder="Ask Loom to build features, fix bugs, or work on your code."
       />
-
-      <div className="composer-row">
-        <input
-          ref={fileRef}
-          type="file"
-          multiple
-          hidden
-          onChange={(e) => pickFiles(e.target.files)}
-        />
-        <button
-          className="icon-btn"
-          title="Attach files"
-          disabled={busy}
-          onClick={() => fileRef.current?.click()}
-        >
-          <IconClip />
-        </button>
-        <div className="seg">
-          {MODELS.map((m) => (
-            <button
-              key={m.id}
-              className={model === m.id ? "on" : ""}
-              disabled={busy}
-              onClick={() => onModel(m.id)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        <span className="spacer" />
-        <span className="hint">Shift+Enter for a new line</span>
-        {busy ? (
-          <button className="btn btn-danger" onClick={onStop}>
-            Stop
-          </button>
-        ) : (
-          <button className="btn btn-primary" disabled={!value.trim()} onClick={onRun}>
-            Run
-          </button>
-        )}
-      </div>
     </div>
   );
-}
-
-function kb(chars: number) {
-  return chars < 1024 ? `${chars} B` : `${Math.round(chars / 1024)} KB`;
 }

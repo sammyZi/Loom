@@ -11,6 +11,7 @@ pub struct AppState {
     pub agent_tx: broadcast::Sender<AgentEvent>,
     pub cancel: Arc<Mutex<Option<CancellationToken>>>,
     pub sandbox: Arc<dyn Sandbox>,
+    pub db: Arc<crate::db::Db>,
 }
 
 impl AppState {
@@ -23,6 +24,12 @@ impl AppState {
             agent_tx,
             cancel: Arc::new(Mutex::new(None)),
             sandbox: native(),
+            // A broken session store must not stop the IDE from running, so fall
+            // back to an in-memory database and log it.
+            db: Arc::new(crate::db::Db::open().unwrap_or_else(|e| {
+                tracing::warn!("session db unavailable ({e:#}); history will not persist");
+                crate::db::Db::memory()
+            })),
         }
     }
 
