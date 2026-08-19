@@ -1,6 +1,6 @@
 "use client";
 
-import { IconChevron, IconRefresh } from "@/components/Icons";
+import { IconChevron, IconClose, IconRefresh } from "@/components/Icons";
 import { baseName } from "@/lib/log";
 
 type FileDiff = { path: string; lines: string[]; add: number; del: number };
@@ -38,17 +38,28 @@ export function splitDiff(diff: string): FileDiff[] {
   return files;
 }
 
-export function DiffPanel({ diff, onRefresh }: { diff: string; onRefresh: () => void }) {
+export function DiffPanel({
+  diff,
+  onRefresh,
+  onClose,
+}: {
+  diff: string;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
   const files = splitDiff(diff);
 
   return (
     <div className="term">
-      <div className="term-tabs">
+      <div className="term-tabs panel-head">
         <span className="panel-title">Changes</span>
         {files.length > 0 && <span className="panel-count">{files.length}</span>}
         <span className="spacer" />
         <button className="icon-btn" onClick={onRefresh} title="Refresh">
           <IconRefresh />
+        </button>
+        <button className="icon-btn" onClick={onClose} title="Hide changes">
+          <IconClose />
         </button>
       </div>
 

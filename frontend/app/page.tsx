@@ -5,7 +5,7 @@ import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
 import { Sidebar, buildGroups } from "@/components/Sidebar";
-import { TerminalPanel } from "@/components/TerminalPanel";
+import { TerminalPanel, appendAgentLog } from "@/components/TerminalPanel";
 import { TopBar, type Panel } from "@/components/TopBar";
 import { Welcome, rememberRecent, type Recent } from "@/components/Welcome";
 import { api, type AgentEvent, wsBase } from "@/lib/api";
@@ -48,6 +48,8 @@ export default function Page() {
   const [model, setModel] = useState("deepseek-v4-pro");
   const [sideOpen, setSideOpen] = useState(true);
   const [panel, setPanel] = useState<Panel>("none");
+  // Shell commands the agent ran, mirrored into the terminal panel's Agent tab.
+  const [agentLog, setAgentLog] = useState("");
   const [maxed, setMaxed] = useState(false);
   const [copied, setCopied] = useState(false);
   // Lets the open-folder screen be shown on demand, not only when nothing is open.
@@ -60,10 +62,14 @@ export default function Page() {
   // another window (or by a script hitting the API) used to drive this feed and
   // flip it to "working" with no prompt from the user. Only follow our own run.
   const myRun = useRef(false);
+  // Read inside the agent socket handler, which must not re-subscribe when the
+  // workspace changes — reconnecting mid-run would drop the rest of the stream.
+  const cwdRef = useRef("");
   const exact = useRef(0);
   const streamed = useRef(0);
   const live = useRef({ sessionId, promptShown, log, sessionFolder });
   live.current = { sessionId, promptShown, log, sessionFolder };
+  cwdRef.current = folder ?? "";
 
   useEffect(() => {
     const saved = localStorage.getItem(MODEL_KEY);
@@ -153,6 +159,8 @@ export default function Page() {
         setTokens(exact.current + Math.round(streamed.current / 4));
       }
       if (ev.type === "diff") refresh().catch(() => {});
+      // Mirror the agent's shell work into the terminal panel's Agent tab.
+      setAgentLog((prev) => appendAgentLog(prev, ev, cwdRef.current));
       const line = formatEvent(ev);
       if (line) setLog((prev) => mergeLog(prev, line));
       if (ev.type === "done") {
@@ -373,6 +381,7 @@ export default function Page() {
         <div className={`shell-wrap ${panel === "terminal" ? "" : "off"} ${maxed ? "maxed" : ""}`}>
           <TerminalPanel
             cwd={folder}
+            agentLog={agentLog}
             maxed={maxed}
             onToggleMax={() => setMaxed((v) => !v)}
             onClose={() => {
@@ -382,7 +391,11 @@ export default function Page() {
           />
         </div>
         <div className={`shell-wrap ${panel === "diff" ? "" : "off"}`}>
-          <DiffPanel diff={diff} onRefresh={() => refresh().catch(() => {})} />
+          <DiffPanel
+            diff={diff}
+            onRefresh={() => refresh().catch(() => {})}
+            onClose={() => setPanel("none")}
+          />
         </div>
       </div>
     </div>

@@ -822,6 +822,12 @@ html, body, .feed, .side-scroll, .term-log {
 
 /* ---------- diff panel ---------- */
 .panel-title { padding: 0 6px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+/* Header for a panel with no tabs: same bar as .term-tabs, but padded to line
+   the title up with the cards below and to give the buttons room on the right. */
+.term-tabs.panel-head { padding: 0 8px 0 14px; gap: 6px; }
+.panel-head .panel-title { padding: 0; }
+/* Divider between the read-only agent section and the user's own terminals. */
+.term-sep { width: 1px; height: 18px; flex-shrink: 0; margin: 0 5px; background: var(--border-2); }
 .panel-empty { padding: 16px; color: var(--faint); font-size: 12.5px; }
 .diff {
   flex: 1;
@@ -956,6 +962,10 @@ html, body, .feed, .side-scroll, .term-log {
   scrollbar-color: #4d4d46 transparent;
 }
 .dfile {
+  /* .diff-scroll is a column flex container, so these default to flex-shrink:1
+     and were being crushed to fit it instead of overflowing — the panel could
+     never scroll, and `overflow: hidden` clipped the squashed content. */
+  flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg);

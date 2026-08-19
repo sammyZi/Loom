@@ -1,8 +1,8 @@
 "use client";
 
 import { IconClose, IconMaximize, IconPlus } from "@/components/Icons";
-import { api } from "@/lib/api";
-import { errText } from "@/lib/log";
+import { api, type AgentEvent } from "@/lib/api";
+import { errText, toolLabel } from "@/lib/log";
 import { useEffect, useRef, useState } from "react";
 
 type Term = { id: number; name: string; log: string };
@@ -21,13 +21,80 @@ export function nextName(terms: { name: string }[]): string {
   }
 }
 
+/**
+ * Split a log into runs, flagging the `cwd> cmd` lines run() echoes so they can
+ * be coloured like the live prompt instead of inheriting the output colour.
+ * Consecutive output lines stay in one run, so a long log renders as a handful
+ * of nodes rather than one span per line.
+ */
+export function splitLog(log: string, cwd: string): { prompt: boolean; text: string }[] {
+  const echo = `${cwd}> `;
+  const lines = log.split("\n");
+  const runs: { prompt: boolean; text: string }[] = [];
+  let buf = "";
+  for (let i = 0; i < lines.length; i++) {
+    const nl = i < lines.length - 1 ? "\n" : "";
+    if (lines[i].startsWith(echo)) {
+      if (buf) {
+        runs.push({ prompt: false, text: buf });
+        buf = "";
+      }
+      runs.push({ prompt: true, text: lines[i] + nl });
+    } else {
+      buf += lines[i] + nl;
+    }
+  }
+  if (buf) runs.push({ prompt: false, text: buf });
+  return runs;
+}
+
+/**
+ * Fold one agent event into the Agent tab's log, ignoring everything that is
+ * not shell work. Kept beside splitLog because both depend on the `cwd> ` echo
+ * format run() writes — if one changes the other must follow.
+ */
+export function appendAgentLog(prev: string, ev: AgentEvent, cwd: string): string {
+  if (ev.type === "tool_call" && ev.name === "run_command") {
+    return `${prev}${cwd}> ${toolLabel(ev.name, ev.input).detail}\n`;
+  }
+  if (ev.type === "tool_result" && ev.name === "run_command") {
+    if (!ev.output) return prev;
+    return prev + (ev.output.endsWith("\n") ? ev.output : `${ev.output}\n`);
+  }
+  return prev;
+}
+
+/** Log body shared by the agent section and the interactive terminals. */
+function LogView({ log, cwd }: { log: string; cwd: string }) {
+  return (
+    <pre className="term-out">
+      {splitLog(log, cwd).map((run, i) =>
+        run.prompt ? (
+          <span key={i}>
+            <span className="term-ps">{cwd}&gt;</span>
+            {run.text.slice(cwd.length + 1)}
+          </span>
+        ) : (
+          run.text
+        ),
+      )}
+    </pre>
+  );
+}
+
+/** Tab id for the read-only agent section; real terminals start at 1. */
+const AGENT_ID = 0;
+
 export function TerminalPanel({
   cwd,
+  agentLog,
   maxed,
   onToggleMax,
   onClose,
 }: {
   cwd: string;
+  /** Commands the agent ran, and their output. Read-only. */
+  agentLog: string;
   maxed: boolean;
   onToggleMax: () => void;
   onClose: () => void;
@@ -39,12 +106,13 @@ export function TerminalPanel({
   const bodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const onAgent = active === AGENT_ID;
   const current = terms.find((t) => t.id === active) || terms[0];
 
   useEffect(() => {
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [current?.log, busy]);
+  }, [current?.log, agentLog, busy]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -100,6 +168,12 @@ export function TerminalPanel({
   return (
     <div className="term">
       <div className="term-tabs">
+        <div className={`term-tab ${onAgent ? "on" : ""}`}>
+          <button className="term-tab-name" onClick={() => setActive(AGENT_ID)}>
+            Agent
+          </button>
+        </div>
+        <span className="term-sep" />
         {terms.map((t) => (
           <div key={t.id} className={`term-tab ${t.id === active ? "on" : ""}`}>
             <button className="term-tab-name" onClick={() => setActive(t.id)}>
@@ -131,25 +205,35 @@ export function TerminalPanel({
       </div>
 
       <div className="term-body" ref={bodyRef} onClick={() => inputRef.current?.focus()}>
-        {current?.log && <pre className="term-out">{current.log}</pre>}
-        <div className="term-line">
-          <span className="term-ps">{cwd}&gt;</span>
-          {busy ? (
-            <span className="term-running">running…</span>
+        {onAgent ? (
+          agentLog ? (
+            <LogView log={agentLog} cwd={cwd} />
           ) : (
-            <input
-              ref={inputRef}
-              value={cmd}
-              onChange={(e) => setCmd(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") run();
-              }}
-              spellCheck={false}
-              autoComplete="off"
-              aria-label="Terminal command"
-            />
-          )}
-        </div>
+            <div className="panel-empty">Commands the agent runs appear here.</div>
+          )
+        ) : (
+          <>
+            {current?.log && <LogView log={current.log} cwd={cwd} />}
+            <div className="term-line">
+              <span className="term-ps">{cwd}&gt;</span>
+              {busy ? (
+                <span className="term-running">running…</span>
+              ) : (
+                <input
+                  ref={inputRef}
+                  value={cmd}
+                  onChange={(e) => setCmd(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") run();
+                  }}
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-label="Terminal command"
+                />
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
