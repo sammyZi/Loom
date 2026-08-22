@@ -154,19 +154,21 @@ pub async fn stream(
 
     let mut text_acc = String::new();
     let mut tools_map: BTreeMap<u64, AccTool> = BTreeMap::new();
-    let mut buf = String::new();
+    // Raw bytes, decoded per complete event. Decoding each TCP chunk on its own
+    // used to corrupt any multi-byte character split across chunks into U+FFFD.
+    let mut buf: Vec<u8> = Vec::new();
     let mut byte_stream = res.bytes_stream();
 
     while let Some(chunk) = byte_stream.next().await {
-        buf.push_str(&String::from_utf8_lossy(&chunk?));
-        while let Some(i) = buf.find("\n\n") {
-            let block = buf[..i].to_string();
-            buf = buf[i + 2..].to_string();
-            handle_block(&block, &mut text_acc, &mut tools_map, &mut on_event)?;
+        buf.extend_from_slice(&chunk?);
+        while let Some(i) = find_event_boundary(&buf) {
+            let block: Vec<u8> = buf.drain(..i + 2).collect();
+            handle_block(&String::from_utf8_lossy(&block), &mut text_acc, &mut tools_map, &mut on_event)?;
         }
     }
-    if !buf.trim().is_empty() {
-        handle_block(&buf, &mut text_acc, &mut tools_map, &mut on_event)?;
+    if !buf.iter().all(|b| b.is_ascii_whitespace()) {
+        let block = String::from_utf8_lossy(&buf).into_owned();
+        handle_block(&block, &mut text_acc, &mut tools_map, &mut on_event)?;
     }
 
     let mut tools_acc = Vec::new();
@@ -193,6 +195,12 @@ struct AccTool {
     id: String,
     name: String,
     args: String,
+}
+
+/// Byte offset of the first `\n\n` event separator. Scanning bytes is safe:
+/// `\n` (0x0A) never appears inside a multi-byte UTF-8 sequence.
+fn find_event_boundary(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
 }
 
 fn handle_block(

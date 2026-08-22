@@ -8,7 +8,7 @@ use anyhow::Result;
 use axum::Router;
 use state::AppState;
 use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,8 +22,21 @@ async fn main() -> Result<()> {
         .init();
 
     let state = AppState::new();
+    // This API executes shell commands, so it must not answer cross-origin
+    // requests from arbitrary websites: any tab could otherwise drive the IDE.
+    // The embedded UI is same-origin and needs no CORS; only the dev server
+    // does. Override with IDE_AI_EXTRA_ORIGIN when serving the UI elsewhere.
+    let mut origins = vec![
+        "http://localhost:3000".parse().unwrap(),
+        "http://127.0.0.1:3000".parse().unwrap(),
+    ];
+    if let Ok(extra) = std::env::var("IDE_AI_EXTRA_ORIGIN") {
+        if let Ok(o) = extra.parse() {
+            origins.push(o);
+        }
+    }
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::list(origins))
         .allow_methods(Any)
         .allow_headers(Any);
     let app = Router::new()

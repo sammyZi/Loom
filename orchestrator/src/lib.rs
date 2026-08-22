@@ -208,17 +208,60 @@ pub async fn run_task(
     Ok(last)
 }
 
+/// Strict small-talk detection. The old "≤3 words starting with hi/hello/hey"
+/// rule swallowed real tasks like "hello world program?" and sent them to a
+/// no-tool chat agent. Now only exact greetings match.
 fn is_greeting(prompt: &str) -> bool {
     let t = prompt
         .trim()
-        .trim_end_matches(['!', '.', '?', ','])
+        .trim_end_matches(['!', '.', ',', ':'])
         .to_ascii_lowercase();
+    if t.is_empty() || t.len() > 32 || t.contains('?') || t.contains('=') || t.contains('(') {
+        return false;
+    }
     matches!(
         t.as_str(),
-        "hi" | "hii" | "hello" | "hey" | "yo" | "sup" | "thanks" | "thank you" | "gm" | "good morning"
-            | "good evening" | "good night" | "howdy"
-    ) || t.split_whitespace().count() <= 3
-        && ["hi", "hello", "hey"].iter().any(|w| t.split_whitespace().any(|p| p == *w))
+        "hi" | "hii" | "hiii"
+            | "hey" | "heyy"
+            | "hello" | "helloo"
+            | "yo" | "sup" | "howdy"
+            | "thanks" | "thank you" | "thx" | "ty"
+            | "gm" | "gn" | "good morning" | "good evening" | "good night" | "good afternoon"
+            | "hi there" | "hey there" | "hello there"
+            | "hi loom" | "hey loom" | "hello loom"
+            | "hi agent" | "hey agent"
+    )
+}
+
+#[cfg(test)]
+mod greeting_tests {
+    use super::is_greeting;
+
+    #[test]
+    fn plain_greetings_are_small_talk() {
+        for g in ["hi", "Hello!", "hey there", "good morning", "thanks"] {
+            assert!(is_greeting(g), "{g}");
+        }
+    }
+
+    #[test]
+    fn real_tasks_are_not_greetings_even_if_they_start_with_hello() {
+        for t in [
+            "hello world program?",
+            "write a hello world app",
+            "hi, add dark mode to the settings page",
+            "explain how routing works",
+            "fix the bug",
+        ] {
+            assert!(!is_greeting(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn long_or_structured_input_is_never_a_greeting() {
+        assert!(!is_greeting("fn main() { println!(\"hi\"); }"));
+        assert!(!is_greeting(""));
+    }
 }
 
 async fn spawn_role(

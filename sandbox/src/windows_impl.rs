@@ -10,7 +10,8 @@ use ide_core::{CommandOutput, WorkspaceRoot};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
@@ -44,19 +45,24 @@ pub struct WindowsSandbox;
 
 #[async_trait]
 impl crate::Sandbox for WindowsSandbox {
-    async fn run(
+    async fn run_streaming(
         &self,
         ws: &WorkspaceRoot,
         program: &str,
         args: &[String],
         timeout: Duration,
+        cancel: &CancellationToken,
+        on_output: Option<crate::OutputSink>,
     ) -> Result<CommandOutput> {
         let ws = ws.clone();
         let program = program.to_string();
         let args = args.to_vec();
-        tokio::task::spawn_blocking(move || run_blocking(&ws, &program, &args, timeout))
-            .await
-            .context("sandbox join")?
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            run_blocking(&ws, &program, &args, timeout, &cancel, on_output)
+        })
+        .await
+        .context("sandbox join")?
     }
 }
 
@@ -65,13 +71,15 @@ fn run_blocking(
     program: &str,
     args: &[String],
     timeout: Duration,
+    cancel: &CancellationToken,
+    on_output: Option<crate::OutputSink>,
 ) -> Result<CommandOutput> {
     let exe = resolve_program(program).with_context(|| format!("find `{program}`"))?;
     let tmp = ws.root().join(".ide-ai-tmp");
     std::fs::create_dir_all(&tmp).ok();
     let cmdline = command_line(&exe, args);
     let env = env_block(ws, &tmp);
-    unsafe { spawn_and_wait(ws.root(), &exe, &cmdline, &env, timeout) }
+    unsafe { spawn_and_wait(ws.root(), &exe, &cmdline, &env, timeout, cancel, on_output) }
 }
 
 fn resolve_program(program: &str) -> Result<PathBuf> {
@@ -104,6 +112,10 @@ fn command_line(exe: &Path, args: &[String]) -> Vec<u16> {
     wide(&parts.join(" "))
 }
 
+/// Windows command-line quoting per the argv rules every CRT parses:
+/// backslash runs are literal except immediately before a quote, where they
+/// double up and the quote itself is escaped. The old naive `"` -> `\"` swap
+/// broke args like `C:\dir\"` and trailing-backslash paths.
 fn quote(s: &str) -> String {
     if s.is_empty() {
         return "\"\"".into();
@@ -111,11 +123,74 @@ fn quote(s: &str) -> String {
     if !s.chars().any(|c| c.is_whitespace() || c == '"') {
         return s.to_string();
     }
-    format!("\"{}\"", s.replace('"', "\\\""))
+    let mut out = String::with_capacity(s.len() + 8);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in s.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                // A run of n backslashes directly before a quote doubles to 2n,
+                // plus one more to escape the quote itself.
+                for _ in 0..(backslashes * 2 + 1) {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            c => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    // Trailing backslashes double up so they cannot escape the closing quote.
+    for _ in 0..(backslashes * 2) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
 }
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod quote_tests {
+    #[test]
+    fn plain_args_stay_unquoted() {
+        assert_eq!(super::quote("ping"), "ping");
+        assert_eq!(super::quote("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn spaces_quote_without_noise() {
+        assert_eq!(super::quote("hello world"), "\"hello world\"");
+    }
+
+    /// Regression: an early draft emitted one stray backslash before the
+    /// closing quote for every arg, so `echo hi` printed `hi\`.
+    #[test]
+    fn no_stray_backslash_when_none_are_present() {
+        assert_eq!(super::quote("a b"), "\"a b\"");
+        // no whitespace or quotes: stays unquoted entirely
+        assert_eq!(super::quote("tick-$_"), "tick-$_");
+    }
+
+    #[test]
+    fn quotes_and_backslash_runs_escape_per_argv_rules() {
+        // n backslashes before a quote -> 2n+1 backslashes then an escaped quote
+        assert_eq!(super::quote("say \"hi\""), r#""say \"hi\"""#);
+        assert_eq!(super::quote("a\\\".b"), r#""a\\\".b""#);
+        // trailing backslashes double up so they cannot escape the closing
+        // quote; without spaces the arg never needs quoting in the first place
+        assert_eq!(super::quote("C:\\dir\\"), "C:\\dir\\");
+        assert_eq!(super::quote("C:\\my dir\\"), "\"C:\\my dir\\\\\"");
+    }
 }
 
 fn env_block(ws: &WorkspaceRoot, tmp: &Path) -> Vec<u16> {
@@ -144,6 +219,8 @@ unsafe fn spawn_and_wait(
     cmdline: &[u16],
     env: &[u16],
     timeout: Duration,
+    cancel: &CancellationToken,
+    on_output: Option<crate::OutputSink>,
 ) -> Result<CommandOutput> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -199,7 +276,7 @@ unsafe fn spawn_and_wait(
     };
 
     if created.is_err() {
-        CreateProcessW(
+        match CreateProcessW(
             PCWSTR(exe_w.as_ptr()),
             Some(PWSTR(cmd.as_mut_ptr())),
             None,
@@ -210,8 +287,17 @@ unsafe fn spawn_and_wait(
             PCWSTR(cwd_w.as_ptr()),
             &si,
             &mut pi,
-        )
-        .context("CreateProcessW")?;
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                // Nothing was spawned, so the job and pipe handles we created
+                // above would leak — close them before bailing.
+                let _ = CloseHandle(job);
+                let _ = CloseHandle(stdout_r);
+                let _ = CloseHandle(stderr_r);
+                return Err(e).context("CreateProcessW");
+            }
+        }
     }
 
     let _ = CloseHandle(stdout_w);
@@ -220,14 +306,36 @@ unsafe fn spawn_and_wait(
     AssignProcessToJobObject(job, pi.hProcess).context("AssignProcessToJobObject")?;
     ResumeThread(pi.hThread);
 
-    let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
     let stdout_raw = stdout_r.0 as usize;
     let stderr_raw = stderr_r.0 as usize;
-    let out_t = std::thread::spawn(move || read_pipe(HANDLE(stdout_raw as *mut _)));
-    let err_t = std::thread::spawn(move || read_pipe(HANDLE(stderr_raw as *mut _)));
+    let out_sink = on_output.clone();
+    let err_sink = on_output.clone();
+    let out_t = std::thread::spawn(move || read_pipe(HANDLE(stdout_raw as *mut _), out_sink));
+    let err_t = std::thread::spawn(move || read_pipe(HANDLE(stderr_raw as *mut _), err_sink));
 
-    let wr = WaitForSingleObject(pi.hProcess, timeout_ms);
-    if wr == WAIT_TIMEOUT {
+    // Wake regularly rather than blocking for the whole timeout, so a cancel
+    // (Ctrl+C, or closing the terminal tab) kills the tree promptly instead of
+    // leaving something like `ping -t` running until the deadline.
+    let deadline = Instant::now() + timeout;
+    let mut stopped: Option<&str> = None;
+    loop {
+        if cancel.is_cancelled() {
+            stopped = Some("cancelled");
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            stopped = Some("timed out");
+            break;
+        }
+        let slice = left.min(Duration::from_millis(100)).as_millis() as u32;
+        if WaitForSingleObject(pi.hProcess, slice) != WAIT_TIMEOUT {
+            break; // exited on its own
+        }
+    }
+    if stopped.is_some() {
+        // Kills every descendant too, which is what closes the pipes and lets
+        // the reader threads below finish.
         let _ = TerminateJobObject(job, 1);
         WaitForSingleObject(pi.hProcess, 5_000);
     }
@@ -241,8 +349,15 @@ unsafe fn spawn_and_wait(
     let _ = CloseHandle(pi.hProcess);
     let _ = CloseHandle(job);
 
-    if wr == WAIT_TIMEOUT {
-        stderr.push_str("\n[sandbox] timed out; process tree killed");
+    // A cancel is the user's own doing and the terminal already shows ^C, so it
+    // stays silent like a real shell. A timeout is not asked for, so it says so.
+    // Written after both pipes closed, hence pushed to any follower explicitly.
+    if stopped == Some("timed out") {
+        let note = "\n[sandbox] timed out; process tree killed";
+        if let Some(tx) = &on_output {
+            let _ = tx.send(note.to_string());
+        }
+        stderr.push_str(note);
     }
     Ok(CommandOutput {
         exit_code: code as i32,
@@ -300,18 +415,33 @@ unsafe fn restricted_token() -> Result<HANDLE> {
     Ok(restricted)
 }
 
-unsafe fn read_pipe(h: HANDLE) -> String {
-    let mut all = Vec::new();
+/// Drain one pipe, forwarding each chunk to `sink` as it arrives so callers can
+/// follow a long command, while still accumulating the whole text to return.
+/// Once the accumulation cap hits, reading continues but the text is discarded:
+/// stopping the reads used to let a full pipe block a chatty child forever.
+unsafe fn read_pipe(h: HANDLE, sink: Option<crate::OutputSink>) -> String {
+    const CAP: usize = 2_000_000;
+    let mut all: Vec<u8> = Vec::new();
+    let mut truncated = false;
     let mut buf = [0u8; WRITE_BUF];
     loop {
         let mut n = 0u32;
         if ReadFile(h, Some(&mut buf), Some(&mut n), None).is_err() || n == 0 {
             break;
         }
-        all.extend_from_slice(&buf[..n as usize]);
-        if all.len() > 2_000_000 {
+        let chunk = &buf[..n as usize];
+        if truncated {
+            continue; // keep draining; content is already capped
+        }
+        all.extend_from_slice(chunk);
+        if let Some(tx) = &sink {
+            // A closed receiver just means nobody is following any more; the
+            // command keeps running and the full output is still returned.
+            let _ = tx.send(String::from_utf8_lossy(chunk).into_owned());
+        }
+        if all.len() > CAP {
             all.extend_from_slice(b"\n[truncated]");
-            break;
+            truncated = true;
         }
     }
     let _ = CloseHandle(h);

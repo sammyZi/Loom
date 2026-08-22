@@ -3,6 +3,7 @@
 import {
   Check,
   ChevronRight,
+  Copy,
   FileDiff,
   Folder,
   GitBranch,
@@ -41,6 +42,7 @@ export const IconRefresh = (p: LucideProps) => <RefreshCw {...p} />;
 export const IconClip = (p: LucideProps) => <Paperclip {...p} />;
 export const IconTrash = (p: LucideProps) => <Trash2 {...p} />;
 export const IconChevron = (p: LucideProps) => <ChevronRight {...p} />;
+export const IconCopy = (p: LucideProps) => <Copy {...p} />;
 export const IconBack = (p: LucideProps) => <ArrowLeft {...p} />;
 export const IconDots = (p: LucideProps) => <MoreHorizontal {...p} />;
 export const IconSliders = (p: LucideProps) => <SlidersHorizontal {...p} />;

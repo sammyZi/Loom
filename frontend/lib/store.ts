@@ -38,7 +38,9 @@ export async function loadAllSessions(): Promise<Session[]> {
 }
 
 export async function saveSession(s: Session): Promise<void> {
-  await call("", { method: "PUT", body: JSON.stringify({ created: s.at, ...s }) });
+  // `created` must come after the spread: `{ created: s.at, ...s }` let a stale
+  // s.created override the intended start time, reshuffling the sidebar list.
+  await call("", { method: "PUT", body: JSON.stringify({ ...s, created: s.created || s.at }) });
 }
 
 export async function deleteSession(id: string): Promise<void> {

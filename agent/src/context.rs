@@ -53,8 +53,22 @@ fn rust_outline(src: &str) -> Option<String> {
     let mut out = String::from("[tree-sitter outline — file too large to send whole]\n");
     out.push_str(&names.join("\n"));
     if out.len() > MAX_CHARS {
-        out.truncate(MAX_CHARS);
+        truncate_chars(&mut out, MAX_CHARS);
         out.push_str("\n[truncated]");
     }
     Some(out)
+}
+
+/// Cut to at most `max` bytes without splitting a multi-byte character.
+/// `String::truncate` panics when the cut lands mid-character, which used to
+/// kill the whole agent task on a Unicode-heavy file.
+fn truncate_chars(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut idx = max;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    s.truncate(idx);
 }

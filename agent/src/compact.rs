@@ -1,6 +1,9 @@
 use crate::deepseek::Message;
 
-const BUDGET: usize = 80_000;
+/// Total characters of message history the model gets to see. Beyond this,
+/// older turns are folded into a summary. Also the denominator of the
+/// context-usage meter in the UI.
+pub const BUDGET: usize = 80_000;
 
 pub fn compact(messages: &mut Vec<Message>) {
     let size: usize = messages.iter().map(|m| m.preview().len()).sum();

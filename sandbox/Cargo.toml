@@ -9,6 +9,7 @@ async-trait.workspace = true
 ide_core = { path = "../core" }
 dunce.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

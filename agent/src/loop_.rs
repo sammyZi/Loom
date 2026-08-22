@@ -39,6 +39,12 @@ pub async fn run_agent(
             anyhow::bail!("cancelled");
         }
         compact::compact(&mut messages);
+        // Report how full the model's window is so the UI can meter it.
+        let used: usize = messages.iter().map(|m| m.preview().len()).sum();
+        let _ = events.send(AgentEvent::Context {
+            used: used as u64,
+            limit: compact::BUDGET as u64,
+        });
         let ev = events.clone();
         let turn = deepseek::stream(&client, &model, &system, &schemas, &messages, &effort, |k| match k {
             StreamKind::Usage(tokens) => {
@@ -115,7 +121,9 @@ pub async fn run_agent(
             });
         }
     }
-    let _ = last_text;
+    let _ = events.send(AgentEvent::Done {
+        summary: last_text,
+    });
     anyhow::bail!("tool loop limit reached")
 }
 
@@ -127,8 +135,13 @@ fn system_prompt(role: AgentRole, ws: &WorkspaceRoot) -> String {
 Paths are relative to the workspace root. You CAN run commands with run_command: it is \
 sandboxed and waits for the command to finish, so it suits installs, builds, tests and one-shot \
 checks. A long-running process such as a dev server is killed when the call returns, so never \
-claim to have started one; give the user the exact command to run in the app terminal panel. \
-Edits must be minimal. Never dump chain-of-thought, tool traces, or README paste into the user reply.\n\n{}",
+claim to have started one; instead give the exact command and tell the user to run it with the \
+terminal panel's \"keep running\" button, which keeps servers alive. \
+You have internet access through web_search (find pages) and web_fetch (read one page); prefer \
+official docs over blog guesses and never fabricate a URL. Use search_files to locate code by \
+content instead of reading files one by one. Edits must be minimal; edit_file replaces exact \
+text and refuses to overwrite an existing file without an exact match. Never dump \
+chain-of-thought, tool traces, or README paste into the user reply.\n\n{}",
         crate::project::summary(ws)
     );
     match role {

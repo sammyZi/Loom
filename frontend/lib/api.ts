@@ -54,18 +54,80 @@ export const api = {
   runAgent: (prompt: string, model: string, mode: string, effort: string) =>
     req("/agent/run", { method: "POST", body: JSON.stringify({ prompt, model, mode, effort }) }),
   cancelAgent: () => req("/agent/cancel", { method: "POST" }),
-  shell: (cmd: string) =>
-    req("/shell/run", { method: "POST", body: JSON.stringify({ cmd }) }) as Promise<{
+  shell: (cmd: string, id: string) =>
+    req("/shell/run", { method: "POST", body: JSON.stringify({ cmd, id }) }) as Promise<{
       exit_code: number;
       stdout: string;
       stderr: string;
     }>,
+  /** Kill whatever terminal `id` is running. No-op if it is idle. */
+  cancelShell: (id: string) =>
+    req("/shell/cancel", { method: "POST", body: JSON.stringify({ id }) }),
   models: () =>
     req("/agent/models") as Promise<{
       models: { id: string; label: string; hint: string }[];
       default: string;
     }>,
 };
+
+/** Terminal output pushed over /ws/shell while a command is still running. */
+export type ShellEvent = { type: "chunk"; id: string; text: string };
+
+/**
+ * Reconnecting WebSocket. The old sockets were created once and never
+ * reopened, so a backend restart left a permanently dead feed/terminal.
+ * Exponential backoff caps at 8s; `onStatus` reports connectivity so the UI
+ * can show it. Malformed frames are dropped instead of crashing the handler.
+ * Returns a dispose function that stops reconnection and closes the socket.
+ */
+export function connectWs(
+  path: string,
+  onMessage: (data: unknown) => void,
+  onStatus?: (connected: boolean) => void,
+): () => void {
+  let sock: WebSocket | null = null;
+  let disposed = false;
+  let attempt = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const open = () => {
+    if (disposed) return;
+    sock = new WebSocket(`${wsBase()}${path}`);
+    sock.onopen = () => {
+      attempt = 0;
+      onStatus?.(true);
+    };
+    sock.onmessage = (m) => {
+      try {
+        onMessage(JSON.parse(String(m.data)));
+      } catch {
+        /* not JSON — ignore */
+      }
+    };
+    sock.onclose = () => {
+      onStatus?.(false);
+      if (disposed) return;
+      attempt += 1;
+      timer = setTimeout(open, Math.min(500 * 2 ** attempt, 8000));
+    };
+    // A failed connect only fires onerror; route it through close so the
+    // backoff in onclose runs.
+    sock.onerror = () => {
+      try {
+        sock?.close();
+      } catch {
+        /* already closing */
+      }
+    };
+  };
+  open();
+
+  return () => {
+    disposed = true;
+    if (timer) clearTimeout(timer);
+    sock?.close();
+  };
+}
 
 export type FileNode = {
   name: string;

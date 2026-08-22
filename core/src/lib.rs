@@ -110,6 +110,14 @@ pub enum FsEvent {
     Removed { path: String },
 }
 
+/// Terminal output as it is produced, so a long-running command shows progress
+/// instead of nothing until it exits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ShellEvent {
+    Chunk { id: String, text: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -119,6 +127,9 @@ pub enum AgentEvent {
     Think { text: String },
     Diff { path: String, diff: String },
     Status { message: String },
+    /// Approximate model context usage for the session: characters of history
+    /// about to be sent, against the compaction budget. Drives the UI meter.
+    Context { used: u64, limit: u64 },
     /// Completion tokens reported by the provider for one model call.
     Usage { tokens: u64 },
     Done { summary: String },

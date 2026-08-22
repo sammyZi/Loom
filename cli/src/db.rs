@@ -74,8 +74,11 @@ impl Db {
         }
     }
 
-    /// Non-archived sessions, newest first by start time.
+    /// Non-archived sessions, newest first by start time. Each transcript is
+    /// capped at its most recent messages so a huge history cannot stall the
+    /// list endpoint that the sidebar polls.
     pub fn list(&self) -> Result<Vec<Session>> {
+        const MSG_CAP: usize = 300;
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, folder, title, at, created, archived
@@ -96,8 +99,10 @@ impl Db {
             .filter_map(|r| r.ok())
             .collect();
 
+        // Newest-first per session, so truncating keeps the latest messages;
+        // reversed again below to restore chronological order.
         let mut msgs = conn.prepare(
-            "SELECT session_id, id, kind, text, detail FROM message ORDER BY session_id, seq",
+            "SELECT session_id, id, kind, text, detail FROM message ORDER BY session_id, seq DESC",
         )?;
         let mut by_session: std::collections::HashMap<String, Vec<serde_json::Value>> =
             std::collections::HashMap::new();
@@ -119,7 +124,9 @@ impl Db {
             by_session.entry(row.0).or_default().push(row.1);
         }
         for s in &mut sessions {
-            if let Some(items) = by_session.remove(&s.id) {
+            if let Some(mut items) = by_session.remove(&s.id) {
+                items.truncate(MSG_CAP);
+                items.reverse();
                 s.log = serde_json::Value::Array(items);
             }
         }

@@ -2011,6 +2011,7 @@ dependencies = [
  "dunce",
  "ide_core",
  "tokio",
+ "tokio-util",
  "windows",
 ]
 

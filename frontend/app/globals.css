@@ -321,6 +321,18 @@ html, body, .feed, .side-scroll, .term-log {
   padding: 3px 9px;
   border-radius: 6px;
 }
+.chip-live {
+  color: #3fb96f;
+}
+.chip-dead {
+  color: #e5484d;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
 
 .feed {
   flex: 1;
@@ -1061,7 +1073,7 @@ html, body, .feed, .side-scroll, .term-log {
   color: #f0ede6;
   caret-color: var(--accent);
 }
-.term-running { color: var(--muted); font-style: italic; }
+.term-body:focus, .term-body:focus-visible { outline: none; }
 
 /* ---------- activity rows (thinking / read / edit / run) ---------- */
 .act { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--muted); }

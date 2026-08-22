@@ -11,17 +11,20 @@ pub fn tree(ws: &WorkspaceRoot) -> Result<FileNode> {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
+    let mut budget = MAX_NODES;
     Ok(FileNode {
         name,
         path: String::new(),
         is_dir: true,
-        children: Some(collect_children(ws, root, 0)?),
+        children: Some(collect_children(ws, root, &mut budget)?),
     })
 }
 
-fn collect_children(ws: &WorkspaceRoot, dir: &Path, count: usize) -> Result<Vec<FileNode>> {
+/// `budget` is shared across the whole recursion so the node cap is global.
+/// Per-level counts used to reset in every branch, letting deep trees blow
+/// far past MAX_NODES.
+fn collect_children(ws: &WorkspaceRoot, dir: &Path, budget: &mut usize) -> Result<Vec<FileNode>> {
     let mut out = Vec::new();
-    let mut n = count;
     let mut entries: Vec<_> = fs::read_dir(dir)
         .with_context(|| format!("read {}", dir.display()))?
         .filter_map(|e| e.ok())
@@ -31,7 +34,7 @@ fn collect_children(ws: &WorkspaceRoot, dir: &Path, count: usize) -> Result<Vec<
         (!is_dir, e.file_name())
     });
     for ent in entries {
-        if n >= MAX_NODES {
+        if *budget == 0 {
             break;
         }
         let name = ent.file_name().to_string_lossy().into_owned();
@@ -40,10 +43,10 @@ fn collect_children(ws: &WorkspaceRoot, dir: &Path, count: usize) -> Result<Vec<
         if is_dir && WorkspaceRoot::is_skipped_dir(&name) {
             continue;
         }
-        n += 1;
+        *budget -= 1;
         let rel = ws.rel_to(&path);
         let children = if is_dir {
-            Some(collect_children(ws, &path, n)?)
+            Some(collect_children(ws, &path, budget)?)
         } else {
             None
         };

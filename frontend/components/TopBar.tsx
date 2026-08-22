@@ -10,6 +10,7 @@ export function TopBar({
   sideOpen,
   panel,
   copied,
+  live = true,
   onShowSide,
   onPanel,
   onCopyLink,
@@ -19,6 +20,8 @@ export function TopBar({
   sideOpen: boolean;
   panel: Panel;
   copied: boolean;
+  /** Backend socket connectivity; a red dot warns that the feed is stale. */
+  live?: boolean;
   onShowSide: () => void;
   onPanel: (p: Panel) => void;
   onCopyLink: () => void;
@@ -32,6 +35,12 @@ export function TopBar({
       )}
       <span className="topbar-title">{title}</span>
       <span className="chip">{project}</span>
+      <span
+        className={`chip ${live ? "chip-live" : "chip-dead"}`}
+        title={live ? "Connected to the Loom backend" : "Reconnecting to the backend…"}
+      >
+        {live ? "connected" : "reconnecting"}
+      </span>
       <span className="spacer" />
       <button className="icon-btn" title="Copy link" onClick={onCopyLink}>
         {copied ? <IconCheck /> : <IconLink />}

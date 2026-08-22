@@ -8,7 +8,7 @@ import { Sidebar, buildGroups } from "@/components/Sidebar";
 import { TerminalPanel, appendAgentLog } from "@/components/TerminalPanel";
 import { TopBar, type Panel } from "@/components/TopBar";
 import { Welcome, rememberRecent, type Recent } from "@/components/Welcome";
-import { api, type AgentEvent, wsBase } from "@/lib/api";
+import { api, connectWs, type AgentEvent } from "@/lib/api";
 import { baseName, countDiff, errText, formatEvent, mergeLog, type LogItem } from "@/lib/log";
 import {
   archiveSession,
@@ -55,6 +55,8 @@ export default function Page() {
   // Lets the open-folder screen be shown on demand, not only when nothing is open.
   const [showPicker, setShowPicker] = useState(false);
   const [err, setErr] = useState("");
+  // Backend socket connectivity, shown as a status dot in the top bar.
+  const [connected, setConnected] = useState(true);
 
   // latest values for the persist-on-finish effect, so it need not re-run per token
   // token accounting: exact totals from the provider, plus a live estimate
@@ -131,49 +133,68 @@ export default function Page() {
     refresh().catch(() => {});
   }, [refresh]);
 
-  useEffect(() => {
-    const files = new WebSocket(`${wsBase()}/ws/files`);
-    files.onmessage = () => {
+  // File events arrive in bursts during builds/checks; each one used to fire a
+  // full workspace+gitStatus+gitDiff refresh immediately. Coalesce them.
+  const refreshTimer = useRef<number | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current !== null) return;
+    refreshTimer.current = window.setTimeout(() => {
+      refreshTimer.current = null;
       refresh().catch(() => {});
-    };
-    const agent = new WebSocket(`${wsBase()}/ws/agent`);
-    agent.onmessage = (m) => {
-      const ev = JSON.parse(m.data) as AgentEvent;
-      if (!myRun.current) return;
-      if (ev.type === "status") {
-        setBusy(true);
-        setPhase(ev.message);
-      }
-      if (ev.type === "done" || ev.type === "error") {
-        myRun.current = false;
-        setBusy(false);
-        setPhase("");
-      }
-      if (ev.type === "usage") {
-        exact.current += ev.tokens;
-        streamed.current = 0;
-        setTokens(exact.current);
-      }
-      if (ev.type === "token" || ev.type === "think") {
-        streamed.current += ev.text.length;
-        setTokens(exact.current + Math.round(streamed.current / 4));
-      }
-      if (ev.type === "diff") refresh().catch(() => {});
-      // Mirror the agent's shell work into the terminal panel's Agent tab.
-      setAgentLog((prev) => appendAgentLog(prev, ev, cwdRef.current));
-      const line = formatEvent(ev);
-      if (line) setLog((prev) => mergeLog(prev, line));
-      if (ev.type === "done") {
-        setLog((prev) =>
-          prev.some((l) => l.kind === "token") ? prev : [...prev, { kind: "ok", text: ev.summary }],
-        );
-      }
-    };
-    return () => {
-      files.close();
-      agent.close();
-    };
+    }, 300);
   }, [refresh]);
+  useEffect(
+    () => () => {
+      if (refreshTimer.current !== null) clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    // connectWs reconnects with backoff and drops malformed frames; both
+    // sockets died permanently before when the backend restarted.
+    const stopFiles = connectWs("/ws/files", scheduleRefresh, setConnected);
+    const stopAgent = connectWs("/ws/agent", (data) => {
+      if (typeof data !== "object" || data === null || !("type" in data)) return;
+      onAgentEvent(data as AgentEvent);
+    });
+    return () => {
+      stopFiles();
+      stopAgent();
+    };
+  }, [scheduleRefresh]);
+
+  function onAgentEvent(ev: AgentEvent) {
+    if (!myRun.current) return;
+    if (ev.type === "status") {
+      setBusy(true);
+      setPhase(ev.message);
+    }
+    if (ev.type === "done" || ev.type === "error") {
+      myRun.current = false;
+      setBusy(false);
+      setPhase("");
+    }
+    if (ev.type === "usage") {
+      exact.current += ev.tokens;
+      streamed.current = 0;
+      setTokens(exact.current);
+    }
+    if (ev.type === "token" || ev.type === "think") {
+      streamed.current += ev.text.length;
+      setTokens(exact.current + Math.round(streamed.current / 4));
+    }
+    if (ev.type === "diff") scheduleRefresh();
+    // Mirror the agent's shell work into the terminal panel's Agent tab.
+    setAgentLog((prev) => appendAgentLog(prev, ev, cwdRef.current));
+    const line = formatEvent(ev);
+    if (line) setLog((prev) => mergeLog(prev, line));
+    if (ev.type === "done") {
+      setLog((prev) =>
+        prev.some((l) => l.kind === "token") ? prev : [...prev, { kind: "ok", text: ev.summary }],
+      );
+    }
+  }
 
   function newTask() {
     setLog([]);
@@ -350,6 +371,7 @@ export default function Page() {
             sideOpen={sideOpen}
             panel={panel}
             copied={copied}
+            live={connected}
             onShowSide={toggleSide}
             onPanel={setPanel}
             onCopyLink={copyLink}
