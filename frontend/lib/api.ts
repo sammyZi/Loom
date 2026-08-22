@@ -51,15 +51,26 @@ export const api = {
     req(`/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`) as Promise<{ diff: string }>,
   commit: (message: string) =>
     req("/git/commit", { method: "POST", body: JSON.stringify({ message }) }),
-  runAgent: (prompt: string, model: string, mode: string, effort: string) =>
-    req("/agent/run", { method: "POST", body: JSON.stringify({ prompt, model, mode, effort }) }),
+  runAgent: (prompt: string, model: string, mode: string, effort: string, sessionId?: string) =>
+    req("/agent/run", {
+      method: "POST",
+      body: JSON.stringify({ prompt, model, mode, effort, session_id: sessionId }),
+    }),
+  /** Answer an approval request for a shell command (manual mode). */
+  answerPermission: (id: string, allow: boolean) =>
+    req("/agent/permission", {
+      method: "POST",
+      body: JSON.stringify({ id, allow }),
+    }),
   cancelAgent: () => req("/agent/cancel", { method: "POST" }),
-  shell: (cmd: string, id: string) =>
-    req("/shell/run", { method: "POST", body: JSON.stringify({ cmd, id }) }) as Promise<{
-      exit_code: number;
-      stdout: string;
-      stderr: string;
-    }>,
+  shell: (cmd: string, id: string, background = false) =>
+    req("/shell/run", {
+      method: "POST",
+      body: JSON.stringify({ cmd, id, background }),
+    }) as Promise<
+      | { exit_code: number; stdout: string; stderr: string }
+      | { started: true; background: true; id: string }
+    >,
   /** Kill whatever terminal `id` is running. No-op if it is idle. */
   cancelShell: (id: string) =>
     req("/shell/cancel", { method: "POST", body: JSON.stringify({ id }) }),
@@ -68,6 +79,30 @@ export const api = {
       models: { id: string; label: string; hint: string }[];
       default: string;
     }>,
+};
+
+/** Archived chats, for the sidebar's archive view. */
+export async function loadArchived(): Promise<SessionLite[]> {
+  try {
+    const { sessions } = (await req("/sessions/archived")) as { sessions: SessionLite[] };
+    return sessions ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function unarchiveSession(id: string): Promise<void> {
+  await req(`/sessions/${encodeURIComponent(id)}/unarchive`, { method: "POST" });
+}
+
+export type SessionLite = {
+  id: string;
+  folder: string;
+  title: string;
+  log: unknown[];
+  at: number;
+  created?: number;
+  archived?: boolean;
 };
 
 /** Terminal output pushed over /ws/shell while a command is still running. */
@@ -143,6 +178,10 @@ export type AgentEvent =
   | { type: "think"; text: string }
   | { type: "diff"; path: string; diff: string }
   | { type: "status"; message: string }
+  /** Approval request for a shell command (manual mode). Answer via answerPermission. */
+  | { type: "ask"; id: string; program: string; args: string }
+  /** Approximate context-window usage for the session (chars vs budget). */
+  | { type: "context"; used: number; limit: number }
   | { type: "usage"; tokens: number }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };

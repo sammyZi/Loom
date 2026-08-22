@@ -1,7 +1,7 @@
 use ide_core::{AgentEvent, FsEvent, ShellEvent, WorkspaceRoot};
 use sandbox::{native, Sandbox};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,11 @@ pub struct AppState {
     pub shell_gen: Arc<AtomicU64>,
     /// The live workspace watcher; replaced (and the old one stopped) on open.
     pub watcher: Arc<Mutex<Option<viewer::WatchGuard>>>,
+    /// Approval gate of the run in flight, when manual mode asks first.
+    pub active_perm: Arc<Mutex<Option<agent::PermGate>>>,
+    /// Rolling chat memory per session id: user prompts and final answers, so
+    /// a follow-up like "now explain it in detail" keeps its context.
+    pub histories: Arc<Mutex<HashMap<String, Vec<agent::Message>>>>,
     pub sandbox: Arc<dyn Sandbox>,
     pub db: Arc<crate::db::Db>,
 }
@@ -57,6 +62,8 @@ impl AppState {
             shells: Arc::new(StdMutex::new(HashMap::new())),
             shell_gen: Arc::new(AtomicU64::new(1)),
             watcher: Arc::new(Mutex::new(None)),
+            active_perm: Arc::new(Mutex::new(None)),
+            histories: Arc::new(Mutex::new(HashMap::new())),
             sandbox: native(),
             // A broken session store must not stop the IDE from running, so fall
             // back to an in-memory database and log it.

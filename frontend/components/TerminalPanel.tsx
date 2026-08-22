@@ -1,17 +1,29 @@
 "use client";
 
-import { IconCheck, IconClose, IconCopy, IconMaximize, IconPlus } from "@/components/Icons";
+import {
+  IconCheck,
+  IconClose,
+  IconCopy,
+  IconMaximize,
+  IconPlay,
+  IconPlus,
+  IconStop,
+} from "@/components/Icons";
 import { api, connectWs, type AgentEvent, type ShellEvent } from "@/lib/api";
 import { errText, toolLabel } from "@/lib/log";
 import { useEffect, useRef, useState } from "react";
 
 /** `job` keys this terminal's running command on the server; it only has to be
- *  unique among open terminals, including ones in another window. */
-type Term = { id: number; name: string; log: string; job: string };
+ *  unique among open terminals, including ones in another window. `running`
+ *  covers both foreground commands and background (keep-alive) processes. */
+type Term = { id: number; name: string; log: string; job: string; running: boolean };
 
 let nextId = 1;
 
 const newJob = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+/** Backend notes appended to the stream when a background job leaves the world. */
+const EXIT_NOTE = /\[exited code \d+\]|\[stopped\]/;
 
 /**
  * Lowest unused "Terminal N". Naming off the tab count reused numbers: with
@@ -104,14 +116,16 @@ export function TerminalPanel({
   onClose: () => void;
 }) {
   const [terms, setTerms] = useState<Term[]>([
-    { id: 1, name: "Terminal 1", log: "", job: newJob() },
+    { id: 1, name: "Terminal 1", log: "", job: newJob(), running: false },
   ]);
   const [active, setActive] = useState(1);
   const [cmd, setCmd] = useState("");
-  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  // Which terminal's command is in flight. `busy` alone is not enough: the user
-  // can switch tabs mid-run, and Ctrl+C must still hit the one that is running.
+  // When set, Enter starts the command as a background process that keeps
+  // running after the call returns — how dev servers stay alive here.
+  const [bgMode, setBgMode] = useState(false);
+  // Which terminal's job is in flight overall, so Ctrl+C still hits the one
+  // that was started last even after switching tabs mid-run.
   const runningJob = useRef<string | null>(null);
   // Jobs whose output already arrived over the socket, so the final HTTP
   // response does not print the same text a second time.
@@ -124,11 +138,17 @@ export function TerminalPanel({
 
   const onAgent = active === AGENT_ID;
   const current = terms.find((t) => t.id === active) || terms[0];
+  const activeRunning = current?.running ?? false;
+
+  const markRunning = (id: number, running: boolean) =>
+    setTerms((prev) => prev.map((t) => (t.id === id ? { ...t, running } : t)));
+  const markJobDone = (job: string) =>
+    setTerms((prev) => prev.map((t) => (t.job === job ? { ...t, running: false } : t)));
 
   useEffect(() => {
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [current?.log, agentLog, busy]);
+  }, [current?.log, agentLog, activeRunning]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -141,15 +161,15 @@ export function TerminalPanel({
   // wherever the user moved on to would be worse than losing it.
   useEffect(() => {
     const root = bodyRef.current;
-    if (busy) {
+    if (activeRunning) {
       root?.focus();
       return;
     }
-    const active = document.activeElement;
-    if (root && (active === document.body || root.contains(active))) {
+    const activeEl = document.activeElement;
+    if (root && (activeEl === document.body || root.contains(activeEl))) {
       inputRef.current?.focus();
     }
-  }, [busy]);
+  }, [activeRunning]);
 
   // Follow output live. Without this a long command shows nothing at all until
   // it exits, which is what made `ping -t` look like a hang. connectWs keeps
@@ -165,13 +185,16 @@ export function TerminalPanel({
         streamed.current.add(ev.id);
         return prev.map((t) => (t.job === ev.id ? { ...t, log: t.log + ev.text } : t));
       });
+      // Background jobs have no follow-up response; the backend's exit note is
+      // what flips their tab back to idle.
+      if (EXIT_NOTE.test(ev.text)) markJobDone(ev.id);
     });
     return () => stop();
   }, []);
 
   function add() {
     nextId += 1;
-    const t = { id: nextId, name: nextName(terms), log: "", job: newJob() };
+    const t = { id: nextId, name: nextName(terms), log: "", job: newJob(), running: false };
     setTerms([...terms, t]);
     setActive(t.id);
   }
@@ -186,15 +209,12 @@ export function TerminalPanel({
     const closing = terms[idx];
     if (closing) {
       api.cancelShell(closing.job).catch(() => {});
-      if (runningJob.current === closing.job) {
-        runningJob.current = null;
-        setBusy(false);
-      }
+      if (runningJob.current === closing.job) runningJob.current = null;
     }
     const next = terms.filter((t) => t.id !== id);
     if (next.length === 0) {
       nextId += 1;
-      setTerms([{ id: nextId, name: "Terminal 1", log: "", job: newJob() }]);
+      setTerms([{ id: nextId, name: "Terminal 1", log: "", job: newJob(), running: false }]);
       setActive(nextId);
       onClose();
       return;
@@ -216,7 +236,7 @@ export function TerminalPanel({
     }
   }
 
-  /** Ctrl+C: kill the running command, the way a real terminal would. */
+  /** Ctrl+C / the stop button: kill the running command, like a real terminal. */
   function interrupt() {
     const job = runningJob.current;
     if (!job) return;
@@ -232,18 +252,27 @@ export function TerminalPanel({
     setTerms((prev) => prev.map((t) => (t.id === tabId ? { ...t, log: t.log + text } : t)));
   }
 
-  async function run() {
-    const line = cmd.trim();
+  /** Shared prologue: claim the tab, echo the line, remember the job. */
+  function beginRun(line: string, tag?: string): { tab: Term } | null {
     const tab = current;
-    if (!line || busy || !tab) return;
+    if (!line || !tab || tab.running) return null;
     setCmd("");
-    setBusy(true);
+    markRunning(tab.id, true);
     runningJob.current = tab.job;
     streamed.current.delete(tab.job);
     interrupted.current.delete(tab.job);
-    append(`${cwd}> ${line}\n`, tab.id);
+    append(`${cwd}> ${line}${tag ? `  ${tag}` : ""}\n`, tab.id);
+    return { tab };
+  }
+
+  async function run() {
+    const line = cmd.trim();
+    const started = beginRun(line);
+    if (!started) return;
+    const tab = started.tab;
     try {
       const r = await api.shell(line, tab.job);
+      if ("started" in r) return; // background answered early; not a fg run
       // Already printed live by the socket; only fall back to the response body
       // when nothing streamed (socket down, or a backend without /ws/shell).
       const out = streamed.current.has(tab.job) ? "" : `${r.stdout}${r.stderr}`;
@@ -259,8 +288,23 @@ export function TerminalPanel({
     }
     streamed.current.delete(tab.job);
     interrupted.current.delete(tab.job);
-    runningJob.current = null;
-    setBusy(false);
+    if (runningJob.current === tab.job) runningJob.current = null;
+    markRunning(tab.id, false);
+  }
+
+  /** Start a dev server or other long-running program. Returns immediately;
+   *  output keeps streaming into this tab until it exits or is stopped. */
+  async function runBg() {
+    const line = cmd.trim();
+    const started = beginRun(line, "[keep running]");
+    if (!started) return;
+    try {
+      await api.shell(line, started.tab.job, true);
+    } catch (e) {
+      append(`${errText(e)}\n`, started.tab.id);
+      if (runningJob.current === started.tab.job) runningJob.current = null;
+      markRunning(started.tab.id, false);
+    }
   }
 
   return (
@@ -275,6 +319,7 @@ export function TerminalPanel({
         {terms.map((t) => (
           <div key={t.id} className={`term-tab ${t.id === active ? "on" : ""}`}>
             <button className="term-tab-name" onClick={() => setActive(t.id)}>
+              {t.running && <span className="term-run-dot" aria-hidden />}
               {t.name}
             </button>
             <button
@@ -313,11 +358,11 @@ export function TerminalPanel({
           // A drag to select output ends in a click. Focusing the prompt here
           // would drop that selection, which made the output impossible to copy.
           if (window.getSelection()?.toString()) return;
-          inputRef.current?.focus();
+          if (!activeRunning) inputRef.current?.focus();
         }}
         onKeyDown={(e) => {
           const mod = e.ctrlKey || e.metaKey;
-          if (mod && e.key === "v" && !onAgent && !busy) {
+          if (mod && e.key === "v" && !onAgent && !activeRunning) {
             // Paste belongs at the prompt wherever the focus happens to be;
             // the browser's own paste then lands in the now-focused input.
             inputRef.current?.focus();
@@ -339,9 +384,9 @@ export function TerminalPanel({
         ) : (
           <>
             {current?.log && <LogView log={current.log} cwd={cwd} />}
-            {/* No prompt while a command runs — a real terminal just streams
-                output and brings the prompt back when the command is done. */}
-            {!busy && (
+            {/* One command per tab: while it runs we show a live status row with
+                an explicit stop, then bring the prompt back when it settles. */}
+            {!activeRunning ? (
               <div className="term-line">
                 <span className="term-ps">{cwd}&gt;</span>
                 <input
@@ -349,12 +394,39 @@ export function TerminalPanel({
                   value={cmd}
                   onChange={(e) => setCmd(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") run();
+                    if (e.key === "Enter") (bgMode ? runBg : run)();
                   }}
                   spellCheck={false}
                   autoComplete="off"
                   aria-label="Terminal command"
+                  placeholder={bgMode ? "command (runs in background)" : undefined}
                 />
+                <button
+                  className={`icon-btn term-bg ${bgMode ? "on" : ""}`}
+                  title={
+                    bgMode
+                      ? "Enter will KEEP THIS RUNNING — for dev servers and watchers"
+                      : "Switch to keep-running mode: Enter starts the command in the background so servers stay alive"
+                  }
+                  aria-pressed={bgMode}
+                  onClick={() => setBgMode(!bgMode)}
+                >
+                  <IconPlay />
+                </button>
+              </div>
+            ) : (
+              <div className="term-line">
+                <span className="act-live" />
+                <span className="term-idle">
+                  running… Ctrl+C or the square stops it
+                </span>
+                <button
+                  className="icon-btn term-stop"
+                  title="Stop the running command"
+                  onClick={interrupt}
+                >
+                  <IconStop />
+                </button>
               </div>
             )}
           </>

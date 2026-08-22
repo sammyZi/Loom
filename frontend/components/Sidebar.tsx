@@ -1,14 +1,19 @@
 "use client";
 
 import {
+  IconArchive,
   IconChevron,
+  IconClose,
   IconFolder,
   IconMark,
   IconPanel,
   IconPlus,
   IconDots,
+  IconSearch,
   IconTrash,
+  IconUndo,
 } from "@/components/Icons";
+import type { SessionLite } from "@/lib/api";
 import type { Recent } from "@/components/Welcome";
 import { baseName } from "@/lib/log";
 import { whenText, type Session } from "@/lib/store";
@@ -24,6 +29,11 @@ export function Sidebar({
   activeId,
   title,
   busy,
+  archiveOpen = false,
+  archived = [],
+  onToggleArchiveView,
+  onUnarchive,
+  onLoadArchivedSession,
   onToggle,
   onNewTask,
   onPick,
@@ -41,10 +51,17 @@ export function Sidebar({
   activeId: string | null;
   title: string;
   busy: boolean;
+  /** The collapsible archive drawer under the project list. */
+  archiveOpen?: boolean;
+  archived?: SessionLite[];
+  onToggleArchiveView?: () => void;
+  onUnarchive?: (id: string) => void;
+  onLoadArchivedSession?: (s: SessionLite) => void;
   onToggle: () => void;
   onNewTask: () => void;
   onPick: () => void;
-  onOpenRecent: (path: string) => void;
+  /** `sessionId` resumes that transcript after the folder opens. */
+  onOpenRecent: (path: string, sessionId?: string) => void;
   onLoadSession: (s: Session) => void;
   onDeleteSession: (id: string) => void;
   onRenameSession: (id: string, title: string) => void;
@@ -56,6 +73,7 @@ export function Sidebar({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [query, setQuery] = useState("");
 
   const flip = (path: string) => setShut((p) => ({ ...p, [path]: !p[path] }));
 
@@ -69,6 +87,33 @@ export function Sidebar({
     onRenameSession(id, draft);
     setRenaming(null);
   }
+
+  /** Case-insensitive filter over the session title and its transcript text. */
+  function matches(texts: string[]) {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return texts.some((t) => t.toLowerCase().includes(q));
+  }
+  const sessionText = (log: unknown[] | undefined) =>
+    (Array.isArray(log) ? log : [])
+      .map((l) => {
+        const o = l as { text?: unknown };
+        return typeof o?.text === "string" ? o.text : "";
+      })
+      .join("\n");
+
+  const visibleGroups = groups
+    .map((g) => ({
+      ...g,
+      sessions: g.sessions.filter((s) =>
+        matches([s.title, s.folder, sessionText(s.log as unknown[])]),
+      ),
+    }))
+    .filter((g) => g.path === folder || g.sessions.length > 0);
+  const qActive = query.trim().length > 0;
+  const visibleArchived = archived.filter((s) =>
+    matches([s.title, s.folder, sessionText(s.log)]),
+  );
 
   return (
     <aside className={`sidebar ${open ? "" : "off"}`}>
@@ -94,9 +139,25 @@ export function Sidebar({
         </button>
       </div>
 
+      <div className="side-search">
+        <IconSearch />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search chats"
+          spellCheck={false}
+          aria-label="Search chats"
+        />
+        {qActive && (
+          <button className="icon-btn side-search-x" title="Clear search" onClick={() => setQuery("")}>
+            <IconClose />
+          </button>
+        )}
+      </div>
+
       <div className="side-scroll">
-        {groups.map((g) => {
-          const current = g.path === folder;
+        {visibleGroups.map((g) => {
+          const current = normEq(g.path, folder);
           const shutNow = shut[g.path] === true;
           return (
             <div className="proj" key={g.path}>
@@ -150,9 +211,12 @@ export function Sidebar({
                         ) : (
                           <button
                             className="sess-open"
-                            title={`${s.title}
-${whenText(s.at)}`}
-                            onClick={() => (current ? onLoadSession(s) : onOpenRecent(g.path))}
+                            title={`${s.title}\n${whenText(s.at)}${
+                              current ? "" : "\nOpens this project and resumes the session"
+                            }`}
+                            onClick={() =>
+                              current ? onLoadSession(s) : onOpenRecent(g.path, s.id)
+                            }
                           >
                             <span className="sess-title">{isActive ? title : s.title}</span>
                           </button>
@@ -195,11 +259,82 @@ ${whenText(s.at)}`}
                     );
                   })}
 
+                  {g.sessions.length === 0 && current && (
+                    <div className="sess-empty">No chats match.</div>
+                  )}
                 </div>
               )}
             </div>
           );
         })}
+
+        {(qActive || visibleGroups.length === 0) && (
+          <div className="no-hits">Nothing found for “{query.trim()}”.</div>
+        )}
+
+        <div className="proj proj-archived">
+          <div className="proj-head">
+            <button
+              className="proj-name arch-toggle"
+              onClick={() => onToggleArchiveView?.()}
+              aria-expanded={archiveOpen}
+              title="Show archived chats"
+            >
+              <IconChevron className={`proj-chev ${archiveOpen ? "" : "down"}`} />
+              <IconArchive className="arch-ico" />
+              Archived
+              {archived.length > 0 && <span className="arch-count">{archived.length}</span>}
+            </button>
+          </div>
+          {archiveOpen && (
+            <div className="proj-body">
+              {visibleArchived.length === 0 && <div className="sess-empty">No archived chats.</div>}
+              {visibleArchived.map((s) => (
+                <div className="sess" key={s.id}>
+                  <span className="dot off" />
+                  <button
+                    className="sess-open"
+                    title={`${s.title}\n${whenText(s.at)}\n${s.folder}`}
+                    onClick={() => onLoadArchivedSession?.(s)}
+                  >
+                    <span className="sess-title">{s.title}</span>
+                  </button>
+                  <div className="sess-menu-wrap">
+                    <button
+                      className="icon-btn sess-dots"
+                      title="Archived chat actions"
+                      onClick={() => setMenuFor(menuFor === `a-${s.id}` ? null : `a-${s.id}`)}
+                    >
+                      <IconDots />
+                    </button>
+                    {menuFor === `a-${s.id}` && (
+                      <div className="menu">
+                        <button
+                          onClick={() => {
+                            setMenuFor(null);
+                            onUnarchive?.(s.id);
+                          }}
+                        >
+                          <IconUndo className="menu-ico" />
+                          Unarchive
+                        </button>
+                        <button
+                          className="menu-danger"
+                          onClick={() => {
+                            setMenuFor(null);
+                            onDeleteSession(s.id);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="side-foot">
@@ -224,16 +359,31 @@ ${whenText(s.at)}`}
   );
 }
 
+function normEq(a: string, b: string) {
+  return a.toLowerCase().replace(/[\\/]+/g, "/") === b.toLowerCase().replace(/[\\/]+/g, "/");
+}
+
+/**
+ * Windows paths are case-insensitive and mix separators, so grouping compares
+ * a normalized key: without this the same project could appear as two groups
+ * ("D:\X" vs "d:/x") and split its sessions across both.
+ */
+export function normPath(p: string) {
+  return p.toLowerCase().replace(/[\\/]+/g, "/");
+}
+
 /** Current project first, then every other project we know about. */
 export function buildGroups(folder: string, recent: Recent[], all: Session[]): Group[] {
   const paths = [folder, ...recent.map((r) => r.path), ...all.map((s) => s.folder)];
   const seen = new Set<string>();
   const out: Group[] = [];
   for (const path of paths) {
-    if (!path || seen.has(path)) continue;
-    seen.add(path);
+    if (!path) continue;
+    const key = normPath(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
     // already ordered by lib/store; keep that order so rows never move
-    const sessions = all.filter((s) => s.folder === path);
+    const sessions = all.filter((s) => normPath(s.folder) === key);
     // Only the open folder gets a group unconditionally. Other projects appear
     // once they actually have history, so clearing sessions empties the list.
     if (path !== folder && sessions.length === 0) continue;

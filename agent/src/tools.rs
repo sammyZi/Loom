@@ -1,19 +1,51 @@
-use anyhow::{Context, Result};
+use anyhow::Context as _;
+use anyhow::Result;
 use async_trait::async_trait;
 use ide_core::{AgentEvent, CommandOutput, WorkspaceRoot};
 use sandbox::Sandbox;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
+use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+/// Shared queue of pending approval requests. The tool registers a oneshot
+/// under an id, announces it with AgentEvent::Ask, and the HTTP layer answers
+/// via POST /agent/permission. Manual mode wires this in; auto modes run free.
+#[derive(Clone, Default)]
+pub struct PermGate {
+    pending: Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
+}
+
+impl PermGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn ask(&self, id: String) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+        rx
+    }
+
+    /// Answer a pending request. Unknown ids are ignored: the request may have
+    /// been cancelled between the Ask event and the user's click.
+    pub fn answer(&self, id: &str, allow: bool) {
+        if let Some(tx) = self.pending.lock().unwrap().remove(id) {
+            let _ = tx.send(allow);
+        }
+    }
+}
+
 pub struct ToolCtx {
     pub ws: WorkspaceRoot,
     pub sandbox: Arc<dyn Sandbox>,
     pub events: broadcast::Sender<AgentEvent>,
+    /// Present when every shell command needs explicit user approval first.
+    pub perm: Option<PermGate>,
 }
 
 #[async_trait]
@@ -809,6 +841,28 @@ impl Tool for RunCommand {
                     .collect()
             })
             .unwrap_or_default();
+
+        // Manual mode: every shell command needs an explicit yes, the way
+        // coding agents ask before touching a terminal.
+        if let Some(gate) = &ctx.perm {
+            let id = format!("perm-{}", uuid_like());
+            let _ = ctx.events.send(AgentEvent::Ask {
+                id: id.clone(),
+                program: program.to_string(),
+                args: args.join(" "),
+            });
+            let rx = gate.ask(id);
+            let allowed = tokio::select! {
+                r = rx => r.unwrap_or(false),
+                _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+            };
+            if !allowed {
+                return Ok("user declined to run this command. Do not retry it; adapt: \
+                           describe what you needed and continue without it."
+                    .into());
+            }
+        }
+
         format_cmd(ctx.sandbox.run(&ctx.ws, program, &args, Duration::from_secs(120), cancel).await?)
     }
 }
@@ -932,6 +986,16 @@ fn format_cmd(out: CommandOutput) -> Result<String> {
         "exit {}\nstdout:\n{}\nstderr:\n{}",
         out.exit_code, out.stdout, out.stderr
     ))
+}
+
+/// Random-enough id for permission requests; not security-sensitive.
+fn uuid_like() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0);
+    format!("{nanos:x}-{:04x}", (nanos as u32) & 0xffff ^ std::process::id())
 }
 
 fn unified_diff(path: &str, before: &str, after: &str) -> String {

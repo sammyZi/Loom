@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  Archive,
+  ArrowLeft,
   Check,
   ChevronRight,
   Copy,
@@ -9,17 +11,20 @@ import {
   GitBranch,
   GitFork,
   Link2,
-  ArrowLeft,
   Maximize2,
   MoreHorizontal,
   PanelLeft,
   Paperclip,
+  Play,
   Plus,
   RefreshCw,
+  Search,
   Server,
   SlidersHorizontal,
+  Square,
   SquareTerminal,
   Trash2,
+  Undo2,
   X,
   type LucideProps,
 } from "lucide-react";
@@ -46,6 +51,11 @@ export const IconCopy = (p: LucideProps) => <Copy {...p} />;
 export const IconBack = (p: LucideProps) => <ArrowLeft {...p} />;
 export const IconDots = (p: LucideProps) => <MoreHorizontal {...p} />;
 export const IconSliders = (p: LucideProps) => <SlidersHorizontal {...p} />;
+export const IconPlay = (p: LucideProps) => <Play {...p} />;
+export const IconStop = (p: LucideProps) => <Square {...p} />;
+export const IconSearch = (p: LucideProps) => <Search {...p} />;
+export const IconArchive = (p: LucideProps) => <Archive {...p} />;
+export const IconUndo = (p: LucideProps) => <Undo2 {...p} />;
 
 /** App wordmark glyph — six petals around a centre, no lucide equivalent. */
 export function IconMark({ className = "brand-mark" }: { className?: string }) {

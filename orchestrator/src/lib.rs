@@ -1,4 +1,4 @@
-use agent::{run_agent, ToolRegistry};
+use agent::{run_agent, Message, PermGate, ToolRegistry};
 use anyhow::Result;
 use ide_core::{AgentEvent, AgentRole, WorkspaceRoot};
 use sandbox::Sandbox;
@@ -30,6 +30,7 @@ impl Mode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_task(
     prompt: String,
     model: String,
@@ -39,6 +40,11 @@ pub async fn run_task(
     sandbox: Arc<dyn Sandbox>,
     events: broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
+    // Earlier turns of this chat session. Only the first agent of the task
+    // sees it — later roles work within the task's own context.
+    history: Vec<Message>,
+    // Present in manual mode so shell commands ask before running.
+    perm: Option<PermGate>,
 ) -> Result<String> {
     if mode == Mode::Plan {
         let _ = events.send(AgentEvent::Status {
@@ -58,6 +64,8 @@ pub async fn run_task(
             cancel,
             ToolRegistry::read_only(),
             true,
+            history,
+            None,
         )
         .await;
     }
@@ -77,6 +85,8 @@ pub async fn run_task(
             cancel,
             ToolRegistry::full(),
             true,
+            history,
+            perm,
         )
         .await;
     }
@@ -96,6 +106,8 @@ pub async fn run_task(
             cancel,
             ToolRegistry::none(),
             true,
+            history,
+            None,
         )
         .await;
     }
@@ -126,6 +138,8 @@ pub async fn run_task(
         cancel.clone(),
         ToolRegistry::read_only(),
         false,
+        history,
+        perm.clone(),
     )
     .await?;
 
@@ -173,6 +187,8 @@ pub async fn run_task(
             cancel.clone(),
             coder_tools(),
             false,
+            Vec::new(),
+            perm.clone(),
         )
         .await?;
 
@@ -192,6 +208,8 @@ pub async fn run_task(
             cancel.clone(),
             ToolRegistry::read_only(),
             false,
+            Vec::new(),
+            None,
         )
         .await?;
         last = review.clone();
@@ -264,6 +282,7 @@ mod greeting_tests {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_role(
     role: AgentRole,
     prompt: String,
@@ -275,11 +294,14 @@ async fn spawn_role(
     cancel: CancellationToken,
     tools: ToolRegistry,
     announce_done: bool,
+    seed: Vec<Message>,
+    perm: Option<PermGate>,
 ) -> Result<String> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String>>(1);
     let handle = tokio::spawn(async move {
         let r = run_agent(
-            role, prompt, model, ws, sandbox, events, cancel, tools, announce_done, effort,
+            role, prompt, model, ws, sandbox, events, cancel, tools, announce_done, effort, seed,
+            perm,
         )
         .await;
         let _ = tx.send(r).await;

@@ -40,6 +40,12 @@ export function formatEvent(ev: AgentEvent): LogItem | null {
       const { text, detail } = toolLabel(ev.name, ev.input);
       return { kind: "tool", text, detail };
     }
+    case "ask":
+      return {
+        kind: "tool",
+        text: "Wants to run",
+        detail: [ev.program, ev.args].filter(Boolean).join(" "),
+      };
     case "error":
       return { kind: "err", text: ev.message };
     default:

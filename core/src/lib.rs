@@ -127,6 +127,13 @@ pub enum AgentEvent {
     Think { text: String },
     Diff { path: String, diff: String },
     Status { message: String },
+    /// Approval request before a shell command runs (manual mode). The UI
+    /// answers it via POST /agent/permission with the same id.
+    Ask {
+        id: String,
+        program: String,
+        args: String,
+    },
     /// Approximate model context usage for the session: characters of history
     /// about to be sent, against the compaction budget. Drives the UI meter.
     Context { used: u64, limit: u64 },

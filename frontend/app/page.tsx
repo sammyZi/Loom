@@ -4,11 +4,11 @@ import { Composer, MODEL_IDS, type SubmitMeta } from "@/components/Composer";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
-import { Sidebar, buildGroups } from "@/components/Sidebar";
+import { Sidebar, buildGroups, normPath } from "@/components/Sidebar";
 import { TerminalPanel, appendAgentLog } from "@/components/TerminalPanel";
 import { TopBar, type Panel } from "@/components/TopBar";
 import { Welcome, rememberRecent, type Recent } from "@/components/Welcome";
-import { api, connectWs, type AgentEvent } from "@/lib/api";
+import { api, connectWs, loadArchived, type AgentEvent, type SessionLite, unarchiveSession } from "@/lib/api";
 import { baseName, countDiff, errText, formatEvent, mergeLog, type LogItem } from "@/lib/log";
 import {
   archiveSession,
@@ -25,6 +25,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const MODEL_KEY = "ide-ai-model";
 const SIDE_KEY = "ide-ai-side";
 const RECENT_KEY = "ide-ai-recent";
+const SIDE_W_KEY = "ide-ai-side-w";
+const PANEL_W_KEY = "ide-ai-panel-w";
+
+/** Panel sizes with sane limits: [default, min, max]. */
+const SIDE_W = { def: 260, min: 200, max: 460 };
+const PANEL_W = { def: 460, min: 300, max: 900 };
 
 export default function Page() {
   const [folder, setFolder] = useState<string | null>(null);
@@ -52,6 +58,17 @@ export default function Page() {
   const [agentLog, setAgentLog] = useState("");
   const [maxed, setMaxed] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Approximate context-window usage for the run in progress (and its last
+  // known value afterwards), driven by backend `context` events.
+  const [ctx, setCtx] = useState<{ used: number; limit: number } | null>(null);
+  // Open approval request from manual mode's shell gate.
+  const [pendingAsk, setPendingAsk] = useState<{ id: string; program: string; args: string } | null>(null);
+  // Archived chats view in the sidebar.
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archived, setArchived] = useState<SessionLite[]>([]);
+  // Resizable columns (sidebar width / terminal & diff panel width).
+  const [sideW, setSideW] = useState(SIDE_W.def);
+  const [panelW, setPanelW] = useState(PANEL_W.def);
   // Lets the open-folder screen be shown on demand, not only when nothing is open.
   const [showPicker, setShowPicker] = useState(false);
   const [err, setErr] = useState("");
@@ -77,8 +94,62 @@ export default function Page() {
     const saved = localStorage.getItem(MODEL_KEY);
     if (saved) setModel(saved);
     setSideOpen(localStorage.getItem(SIDE_KEY) !== "0");
+    const sw = Number(localStorage.getItem(SIDE_W_KEY));
+    if (sw >= SIDE_W.min && sw <= SIDE_W.max) setSideW(sw);
+    const pw = Number(localStorage.getItem(PANEL_W_KEY));
+    if (pw >= PANEL_W.min && pw <= PANEL_W.max) setPanelW(pw);
     loadRecent();
   }, []);
+
+  /** Shared drag logic for the column-resize handles. Sizing is clamped and
+   *  remembered, so a bad value can never wedge the layout. */
+  function startDrag(kind: "side" | "panel") {
+    return (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startSide = sideW;
+      const startPanel = panelW;
+      document.body.classList.add("dragging-col");
+      const move = (ev: PointerEvent) => {
+        if (kind === "side") {
+          const w = Math.min(SIDE_W.max, Math.max(SIDE_W.min, startSide + ev.clientX - startX));
+          setSideW(w);
+        } else {
+          const w = Math.min(PANEL_W.max, Math.max(PANEL_W.min, startPanel - (ev.clientX - startX)));
+          setPanelW(w);
+        }
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        document.body.classList.remove("dragging-col");
+        setSideW((w) => {
+          localStorage.setItem(SIDE_W_KEY, String(w));
+          return w;
+        });
+        setPanelW((w) => {
+          localStorage.setItem(PANEL_W_KEY, String(w));
+          return w;
+        });
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    };
+  }
+
+  async function toggleArchiveView() {
+    const next = !archiveOpen;
+    setArchiveOpen(next);
+    if (next && archived.length === 0) {
+      setArchived(await loadArchived());
+    }
+  }
+
+  async function doUnarchive(id: string) {
+    await unarchiveSession(id).catch(() => {});
+    setArchived((prev) => prev.filter((s) => s.id !== id));
+    reloadSessions();
+  }
 
   function loadRecent() {
     try {
@@ -170,6 +241,12 @@ export default function Page() {
       setBusy(true);
       setPhase(ev.message);
     }
+    if (ev.type === "ask") {
+      setPendingAsk({ id: ev.id, program: ev.program, args: ev.args });
+    }
+    if (ev.type === "context") {
+      setCtx({ used: ev.used, limit: ev.limit });
+    }
     if (ev.type === "done" || ev.type === "error") {
       myRun.current = false;
       setBusy(false);
@@ -196,11 +273,24 @@ export default function Page() {
     }
   }
 
+  /**
+   * Reset the whole chat surface for a fresh task or a freshly opened folder.
+   * Everything project-scoped must go here: the terminal's Agent tab used to
+   * keep the previous project's commands after a switch, which read like one
+   * project's sessions bleeding into another.
+   */
   function newTask() {
     setLog([]);
     setPromptShown("");
     setSessionId(null);
     setSessionFolder(null);
+    setAgentLog("");
+    setTokens(0);
+    exact.current = 0;
+    streamed.current = 0;
+    setCtx(null);
+    setPhase("");
+    setErr("");
   }
 
   async function pick() {
@@ -218,15 +308,52 @@ export default function Page() {
     }
   }
 
-  async function openRecent(path: string) {
+  async function openRecent(path: string, sessionId?: string) {
     setErr("");
     try {
+      const wasOpen = normPath(path) === normPath(folder ?? "");
       await api.open(path);
+      if (!wasOpen) newTask();
       rememberRecent(path);
       loadRecent();
-      newTask();
       setShowPicker(false);
       await refresh();
+      // Clicking a session of another project opens that folder and then
+      // resumes the clicked transcript instead of dropping into a blank task.
+      if (sessionId) {
+        const all = await loadAllSessions();
+        const s = all.find((x) => x.id === sessionId);
+        if (s && s.folder === path) loadSession(s);
+      }
+    } catch (e) {
+      setErr(errText(e));
+    }
+  }
+
+  /** Load a stored transcript into the chat. Guarded against mid-run swaps:
+   *  detaching from a live run used to merge two transcripts into one log. */
+  function loadSession(s: Session) {
+    if (busy) return;
+    if (normPath(s.folder) !== normPath(folder ?? "")) {
+      void openRecent(s.folder, s.id);
+      return;
+    }
+    setSessionId(s.id);
+    setSessionFolder(s.folder);
+    setPromptShown(s.title);
+    setLog(s.log);
+    setTokens(0);
+    exact.current = 0;
+    streamed.current = 0;
+    setCtx(null);
+  }
+
+  async function decideAsk(allow: boolean) {
+    const ask = pendingAsk;
+    if (!ask) return;
+    setPendingAsk(null);
+    try {
+      await api.answerPermission(ask.id, allow);
     } catch (e) {
       setErr(errText(e));
     }
@@ -250,8 +377,11 @@ export default function Page() {
 
     // Continue the open session instead of starting a new one on every send.
     // A fresh id is minted only when nothing is open (New task, or first message).
-    if (!sessionId) {
-      setSessionId(newSessionId());
+    // The id also keys the backend's chat memory, so follow-ups keep context.
+    let sid = sessionId;
+    if (!sid) {
+      sid = newSessionId();
+      setSessionId(sid);
       setSessionFolder(folder);
     }
     // The session title stays the first message, so the sidebar name is stable.
@@ -260,13 +390,14 @@ export default function Page() {
     exact.current = 0;
     streamed.current = 0;
     setTokens(0);
+    setCtx(null);
     myRun.current = true;
     // Set busy BEFORE the request. Setting it after the await raced the websocket:
     // a fast run could emit status+done first, and the late setBusy(true) re-latched
     // it forever, so the run never "finished" and the transcript was never saved.
     setBusy(true);
     try {
-      await api.runAgent(body, id, mode, effort);
+      await api.runAgent(body, id, mode, effort, sid);
       setPrompt("");
     } catch (e) {
       myRun.current = false;
@@ -321,7 +452,10 @@ export default function Page() {
 
   return (
     <div className="app">
-      <div className="work">
+      <div
+        className="work"
+        style={{ ["--side-w" as string]: `${sideW}px`, ["--panel-w" as string]: `${panelW}px` }}
+      >
         <Sidebar
           open={sideOpen}
           folder={folder}
@@ -330,19 +464,30 @@ export default function Page() {
           activeId={sessionId}
           title={title}
           busy={busy}
+          archiveOpen={archiveOpen}
+          archived={archived}
+          onToggleArchiveView={toggleArchiveView}
+          onUnarchive={doUnarchive}
+          onLoadArchivedSession={(s) => {
+            const conv: Session = {
+              id: s.id,
+              folder: s.folder,
+              title: s.title,
+              at: s.at,
+              created: s.created ?? s.at,
+              log: (Array.isArray(s.log) ? s.log : []) as LogItem[],
+            };
+            loadSession(conv);
+          }}
           onToggle={toggleSide}
           onNewTask={newTask}
           onPick={() => setShowPicker(true)}
           onOpenRecent={openRecent}
-          onLoadSession={(s) => {
-            setSessionId(s.id);
-            setSessionFolder(s.folder);
-            setPromptShown(s.title);
-            setLog(s.log);
-          }}
+          onLoadSession={loadSession}
           onClearAll={async () => {
             await clearAllSessions();
             setSessions([]);
+            setArchived([]);
             setRecent([]);
             newTask();
             setShowPicker(true);
@@ -350,6 +495,7 @@ export default function Page() {
           onDeleteSession={async (id) => {
             await deleteSession(id);
             await reloadSessions();
+            setArchived((prev) => prev.filter((s) => s.id !== id));
             if (id === sessionId) newTask();
           }}
           onRenameSession={async (id, next) => {
@@ -360,9 +506,15 @@ export default function Page() {
           onArchiveSession={async (id) => {
             await archiveSession(id);
             await reloadSessions();
+            setArchived(await loadArchived());
             if (id === sessionId) newTask();
           }}
         />
+        {sideOpen && (
+          <div className="gutter gutter-side" onPointerDown={startDrag("side")} title="Drag to resize the sidebar">
+            <span />
+          </div>
+        )}
 
         <main className="center">
           <TopBar
@@ -384,6 +536,9 @@ export default function Page() {
             phase={phase}
             elapsed={elapsed}
             tokens={tokens}
+            ctx={ctx}
+            pending={pendingAsk}
+            onDecide={decideAsk}
           />
 
           <div className="composer-wrap">
@@ -400,6 +555,15 @@ export default function Page() {
           </div>
         </main>
 
+        {panel !== "none" && (
+          <div
+            className="gutter gutter-panel"
+            onPointerDown={startDrag("panel")}
+            title="Drag to resize the panel"
+          >
+            <span />
+          </div>
+        )}
         <div className={`shell-wrap ${panel === "terminal" ? "" : "off"} ${maxed ? "maxed" : ""}`}>
           <TerminalPanel
             cwd={folder}

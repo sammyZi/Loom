@@ -12,6 +12,9 @@ export function Feed({
   phase,
   elapsed,
   tokens,
+  ctx,
+  pending,
+  onDecide,
 }: {
   prompt: string;
   log: LogItem[];
@@ -19,6 +22,11 @@ export function Feed({
   phase: string;
   elapsed: number;
   tokens: number;
+  /** Approximate context-window usage; null until the first agent turn. */
+  ctx?: { used: number; limit: number } | null;
+  /** Open approval request (manual mode): the agent wants to run a command. */
+  pending?: { id: string; program: string; args: string } | null;
+  onDecide?: (allow: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -27,7 +35,7 @@ export function Feed({
   useEffect(() => {
     const el = ref.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [log, prompt, busy]);
+  }, [log, prompt, busy, ctx]);
 
   const groups = groupLog(log);
   return (
@@ -62,7 +70,29 @@ export function Feed({
           ),
         )}
 
-        {busy && (
+        {/* Approval gate (manual mode): nothing runs until the user picks. */}
+        {pending && (
+          <div className="perm-card" role="alertdialog" aria-label="Approve command">
+            <div className="perm-head">
+              <span className="badge warn">approval needed</span>
+              <span className="perm-sub">The agent wants to run a command</span>
+            </div>
+            <code className="perm-cmd">
+              {pending.program}
+              {pending.args ? ` ${pending.args}` : ""}
+            </code>
+            <div className="perm-actions">
+              <button className="perm-allow" onClick={() => onDecide?.(true)}>
+                Allow once
+              </button>
+              <button className="perm-deny" onClick={() => onDecide?.(false)}>
+                Deny
+              </button>
+            </div>
+          </div>
+        )}
+
+        {busy && !pending && (
           <p className="working">
             <span className="work-mark">
               <IconMark />
@@ -70,12 +100,42 @@ export function Feed({
             <span className="work-stats">
               {secs(elapsed)}
               {tokens > 0 && ` · ${tokens.toLocaleString()} tokens`}
+              {ctx && ` · ${ctxPercent(ctx)}% context`}
               {" · "}
               <span className="act-now">still thinking…</span>
             </span>
           </p>
         )}
+
+        {/* Context-window meter: how much of the model's window this session
+            has used, and how much is still free. Persists after the run. */}
+        {ctx && <CtxMeter used={ctx.used} limit={ctx.limit} />}
       </div>
+    </div>
+  );
+}
+
+function ctxPercent(ctx: { used: number; limit: number }) {
+  if (ctx.limit <= 0) return 0;
+  return Math.min(100, Math.round((ctx.used / ctx.limit) * 100));
+}
+
+function fmtK(n: number) {
+  if (n >= 1000) return `${Math.round(n / 100) / 10}k`;
+  return String(n);
+}
+
+export function CtxMeter({ used, limit }: { used: number; limit: number }) {
+  const pct = ctxPercent({ used, limit });
+  const free = Math.max(0, limit - used);
+  return (
+    <div className="ctx-meter" title="Approximate model context usage for this session">
+      <span className="ctx-bar" aria-hidden>
+        <span className={`ctx-fill ${pct >= 90 ? "hot" : ""}`} style={{ width: `${pct}%` }} />
+      </span>
+      <span className={`ctx-label ${pct >= 90 ? "hot" : ""}`}>
+        context {fmtK(used)} / {fmtK(limit)} · {fmtK(free)} left
+      </span>
     </div>
   );
 }

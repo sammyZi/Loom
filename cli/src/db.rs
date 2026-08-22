@@ -196,6 +196,71 @@ impl Db {
         Ok(())
     }
 
+    /// Bring an archived session back into the main list.
+    pub fn unarchive(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE session SET archived = 0 WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Only the archived sessions, newest first — the sidebar's archive view.
+    pub fn list_archived(&self) -> Result<Vec<Session>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.folder, s.title, s.at, s.created, s.archived
+             FROM session s WHERE s.archived = 1 ORDER BY s.created DESC",
+        )?;
+        let mut sessions: Vec<Session> = stmt
+            .query_map([], |r| {
+                Ok(Session {
+                    id: r.get(0)?,
+                    folder: r.get(1)?,
+                    title: r.get(2)?,
+                    log: serde_json::json!([]),
+                    at: r.get(3)?,
+                    created: r.get(4)?,
+                    archived: r.get::<_, i64>(5)? != 0,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Attach each archived transcript (same cap as list()).
+        const MSG_CAP: usize = 300;
+        let mut msgs = conn.prepare(
+            "SELECT m.session_id, m.id, m.kind, m.text, m.detail
+             FROM message m JOIN session s ON s.id = m.session_id
+             WHERE s.archived = 1 ORDER BY m.session_id, m.seq DESC",
+        )?;
+        let mut by_session: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+        for row in msgs
+            .query_map([], |r| {
+                let detail: Option<String> = r.get(4)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    serde_json::json!({
+                        "id": r.get::<_, String>(1)?,
+                        "kind": r.get::<_, String>(2)?,
+                        "text": r.get::<_, String>(3)?,
+                        "detail": detail,
+                    }),
+                ))
+            })?
+            .flatten()
+        {
+            by_session.entry(row.0).or_default().push(row.1);
+        }
+        for s in &mut sessions {
+            if let Some(mut items) = by_session.remove(&s.id) {
+                items.truncate(MSG_CAP);
+                items.reverse();
+                s.log = serde_json::Value::Array(items);
+            }
+        }
+        Ok(sessions)
+    }
+
     pub fn clear(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM session", [])?;

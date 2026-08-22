@@ -1,6 +1,6 @@
 use crate::compact;
 use crate::deepseek::{self, Message, StreamKind};
-use crate::tools::{ToolCtx, ToolRegistry};
+use crate::tools::{PermGate, ToolCtx, ToolRegistry};
 use anyhow::Result;
 use ide_core::{AgentEvent, AgentRole, WorkspaceRoot};
 use sandbox::Sandbox;
@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent(
     role: AgentRole,
     prompt: String,
@@ -20,6 +21,11 @@ pub async fn run_agent(
     tools: ToolRegistry,
     announce_done: bool,
     effort: String,
+    // Earlier user/assistant turns of this chat session, so follow-up prompts
+    // ("now explain it in detail") keep their context.
+    seed: Vec<Message>,
+    // Present in manual mode: shell commands ask for approval before running.
+    perm: Option<PermGate>,
 ) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -29,8 +35,10 @@ pub async fn run_agent(
         ws,
         sandbox,
         events: events.clone(),
+        perm,
     };
-    let mut messages = vec![Message::user_text(prompt)];
+    let mut messages = seed;
+    messages.push(Message::user_text(prompt));
     let system = system_prompt(role, &ctx.ws);
     let mut last_text = String::new();
 
@@ -159,8 +167,9 @@ Run check_code and run_tests. If tests/compiler fail, say REVISE and list exact 
 If they pass, say APPROVED and a one-line summary."
         ),
         AgentRole::Single => format!(
-            "{common}\nYou are chatting in the IDE. Reply like a person. \
-If they say hi or small-talk, greet them and ask what to work on. Do not use tools. Do not write a plan."
+            "{common}\nYou are chatting in the IDE and can use tools directly. Shell commands \
+             need the user's approval first; if they decline one, do not retry — adapt. \
+             Reply like a person. If they say hi or small-talk, greet them and ask what to work on."
         ),
     }
 }
