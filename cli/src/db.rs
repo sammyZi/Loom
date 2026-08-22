@@ -45,6 +45,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS session (
 
 pub struct Db {
     conn: Mutex<Connection>,
+    /// Where the file lives; surfaced in logs so users can find/backup it.
+    #[allow(dead_code)]
     pub path: PathBuf,
 }
 

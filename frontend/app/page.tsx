@@ -1,14 +1,23 @@
 "use client";
 
-import { Composer, MODEL_IDS, type SubmitMeta } from "@/components/Composer";
+import { Composer, type SubmitMeta } from "@/components/Composer";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
+import { SettingsModal } from "@/components/SettingsModal";
 import { Sidebar, buildGroups, normPath } from "@/components/Sidebar";
-import { TerminalPanel, appendAgentLog } from "@/components/TerminalPanel";
+import { TerminalPanel } from "@/components/TerminalPanel";
 import { TopBar, type Panel } from "@/components/TopBar";
 import { Welcome, rememberRecent, type Recent } from "@/components/Welcome";
-import { api, connectWs, loadArchived, type AgentEvent, type SessionLite, unarchiveSession } from "@/lib/api";
+import {
+  api,
+  connectWs,
+  loadArchived,
+  type AgentEvent,
+  type ModelCatalog,
+  type SessionLite,
+  unarchiveSession,
+} from "@/lib/api";
 import { baseName, countDiff, errText, formatEvent, mergeLog, type LogItem } from "@/lib/log";
 import {
   archiveSession,
@@ -51,16 +60,19 @@ export default function Page() {
   const [phase, setPhase] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [tokens, setTokens] = useState(0);
-  const [model, setModel] = useState("deepseek-v4-pro");
+  // Selected model as "provider/model"; the catalog gives it a friendly label.
+  const [model, setModel] = useState("deepseek/deepseek-chat");
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [sideOpen, setSideOpen] = useState(true);
   const [panel, setPanel] = useState<Panel>("none");
-  // Shell commands the agent ran, mirrored into the terminal panel's Agent tab.
+  // The agent's commands stream into the terminal panel's Agent tab via
+  // /ws/shell chunks with id "agent".
   const [agentLog, setAgentLog] = useState("");
   const [maxed, setMaxed] = useState(false);
   const [copied, setCopied] = useState(false);
   // Approximate context-window usage for the run in progress (and its last
   // known value afterwards), driven by backend `context` events.
-  const [ctx, setCtx] = useState<{ used: number; limit: number } | null>(null);
   // Open approval request from manual mode's shell gate.
   const [pendingAsk, setPendingAsk] = useState<{ id: string; program: string; args: string } | null>(null);
   // Archived chats view in the sidebar.
@@ -81,25 +93,36 @@ export default function Page() {
   // another window (or by a script hitting the API) used to drive this feed and
   // flip it to "working" with no prompt from the user. Only follow our own run.
   const myRun = useRef(false);
-  // Read inside the agent socket handler, which must not re-subscribe when the
-  // workspace changes — reconnecting mid-run would drop the rest of the stream.
-  const cwdRef = useRef("");
   const exact = useRef(0);
   const streamed = useRef(0);
   const live = useRef({ sessionId, promptShown, log, sessionFolder });
   live.current = { sessionId, promptShown, log, sessionFolder };
-  cwdRef.current = folder ?? "";
 
   useEffect(() => {
     const saved = localStorage.getItem(MODEL_KEY);
-    if (saved) setModel(saved);
+    if (saved) setModel(legacyModel(saved));
     setSideOpen(localStorage.getItem(SIDE_KEY) !== "0");
     const sw = Number(localStorage.getItem(SIDE_W_KEY));
     if (sw >= SIDE_W.min && sw <= SIDE_W.max) setSideW(sw);
     const pw = Number(localStorage.getItem(PANEL_W_KEY));
     if (pw >= PANEL_W.min && pw <= PANEL_W.max) setPanelW(pw);
     loadRecent();
+    // Provider catalog for the model picker; refreshed after settings change.
+    api.models()
+      .then((c) => {
+        setCatalog(c);
+        if (!saved && c.default) setModel(c.default);
+      })
+      .catch(() => {});
   }, []);
+
+  /** Model ids from before the multi-provider era map onto DeepSeek. */
+  function legacyModel(id: string): string {
+    if (id.includes("/")) return id;
+    if (id.includes("flash")) return "deepseek/deepseek-chat";
+    if (id.includes("pro") || id.includes("reasoner")) return "deepseek/deepseek-reasoner";
+    return id;
+  }
 
   /** Shared drag logic for the column-resize handles. Sizing is clamped and
    *  remembered, so a bad value can never wedge the layout. */
@@ -229,9 +252,18 @@ export default function Page() {
       if (typeof data !== "object" || data === null || !("type" in data)) return;
       onAgentEvent(data as AgentEvent);
     });
+    // The agent's own commands stream live under terminal id "agent" — this
+    // replaced folding tool_call/tool_result pairs, which mispaired whenever
+    // a command failed between the two events.
+    const stopShell = connectWs("/ws/shell", (data) => {
+      const ev = data as { type?: string; id?: string; text?: string };
+      if (!ev || ev.type !== "chunk" || ev.id !== "agent" || typeof ev.text !== "string") return;
+      setAgentLog((prev) => prev + ev.text);
+    });
     return () => {
       stopFiles();
       stopAgent();
+      stopShell();
     };
   }, [scheduleRefresh]);
 
@@ -243,9 +275,6 @@ export default function Page() {
     }
     if (ev.type === "ask") {
       setPendingAsk({ id: ev.id, program: ev.program, args: ev.args });
-    }
-    if (ev.type === "context") {
-      setCtx({ used: ev.used, limit: ev.limit });
     }
     if (ev.type === "done" || ev.type === "error") {
       myRun.current = false;
@@ -262,8 +291,6 @@ export default function Page() {
       setTokens(exact.current + Math.round(streamed.current / 4));
     }
     if (ev.type === "diff") scheduleRefresh();
-    // Mirror the agent's shell work into the terminal panel's Agent tab.
-    setAgentLog((prev) => appendAgentLog(prev, ev, cwdRef.current));
     const line = formatEvent(ev);
     if (line) setLog((prev) => mergeLog(prev, line));
     if (ev.type === "done") {
@@ -288,12 +315,9 @@ export default function Page() {
     setTokens(0);
     exact.current = 0;
     streamed.current = 0;
-    setCtx(null);
     setPhase("");
     setErr("");
-  }
-
-  async function pick() {
+  }  async function pick() {
     setErr("");
     try {
       const r = await api.pick();
@@ -345,7 +369,6 @@ export default function Page() {
     setTokens(0);
     exact.current = 0;
     streamed.current = 0;
-    setCtx(null);
   }
 
   async function decideAsk(allow: boolean) {
@@ -363,7 +386,8 @@ export default function Page() {
     setErr("");
     if (!text.trim() || busy) return;
 
-    const id = MODEL_IDS[meta.model] ?? "deepseek-v4-pro";
+    // meta.model is already a full "provider/model" selection.
+    const id = meta.model || catalog?.default || "deepseek/deepseek-chat";
     setModel(id);
     localStorage.setItem(MODEL_KEY, id);
 
@@ -390,7 +414,6 @@ export default function Page() {
     exact.current = 0;
     streamed.current = 0;
     setTokens(0);
-    setCtx(null);
     myRun.current = true;
     // Set busy BEFORE the request. Setting it after the await raced the websocket:
     // a fast run could emit status+done first, and the late setBusy(true) re-latched
@@ -406,6 +429,21 @@ export default function Page() {
     }
   }
 
+  /**
+   * Kill switch: reset the UI first so the stop feels instant, then tell the
+   * backend, which aborts the LLM stream and kills every agent-spawned
+   * process tree (foreground and background) within milliseconds.
+   */
+  async function stopRun() {
+    if (!myRun.current && !busy) return;
+    myRun.current = false;
+    setBusy(false);
+    setPhase("");
+    setPendingAsk(null);
+    setLog((prev) => [...prev, { kind: "ok", text: "*Stopped.*" }]);
+    await api.cancelAgent().catch(() => {});
+  }
+
   async function commit(message: string) {
     setErr("");
     try {
@@ -413,6 +451,9 @@ export default function Page() {
       await refresh();
     } catch (e) {
       setErr(errText(e));
+      // Rethrow so the commit button leaves its "Committing…" state and keeps
+      // the typed message for a retry; the error itself is reported above.
+      throw e;
     }
   }
 
@@ -446,12 +487,16 @@ export default function Page() {
 
   const project = baseName(folder);
   const title = promptShown || "New task";
-  // PromptInput keeps its own model state and defaults to models[0],
-  // so put the remembered model first.
-  const models = model.includes("flash") ? ["Flash", "Pro"] : ["Pro", "Flash"];
 
   return (
     <div className="app">
+      {settingsOpen && (
+        <SettingsModal
+          catalog={catalog}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={setCatalog}
+        />
+      )}
       <div
         className="work"
         style={{ ["--side-w" as string]: `${sideW}px`, ["--panel-w" as string]: `${panelW}px` }}
@@ -484,6 +529,7 @@ export default function Page() {
           onPick={() => setShowPicker(true)}
           onOpenRecent={openRecent}
           onLoadSession={loadSession}
+          onOpenSettings={() => setSettingsOpen(true)}
           onClearAll={async () => {
             await clearAllSessions();
             setSessions([]);
@@ -536,7 +582,6 @@ export default function Page() {
             phase={phase}
             elapsed={elapsed}
             tokens={tokens}
-            ctx={ctx}
             pending={pendingAsk}
             onDecide={decideAsk}
           />
@@ -545,11 +590,17 @@ export default function Page() {
             <ContextBar project={project} git={git} stat={stat} onCommit={commit} />
             <Composer
               value={prompt}
-              models={models}
               busy={busy}
               onChange={setPrompt}
               onSubmit={run}
-              onStop={() => api.cancelAgent()}
+              onStop={stopRun}
+              groups={catalog?.groups}
+              modelId={model}
+              onModelChange={(id) => {
+                setModel(id);
+                localStorage.setItem(MODEL_KEY, id);
+              }}
+              onOpenSettings={() => setSettingsOpen(true)}
             />
             {err && <div className="err">{err}</div>}
           </div>
@@ -575,8 +626,7 @@ export default function Page() {
               setMaxed(false);
             }}
           />
-        </div>
-        <div className={`shell-wrap ${panel === "diff" ? "" : "off"}`}>
+        </div>        <div className={`shell-wrap ${panel === "diff" ? "" : "off"}`}>
           <DiffPanel
             diff={diff}
             onRefresh={() => refresh().catch(() => {})}

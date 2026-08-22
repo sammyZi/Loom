@@ -39,8 +39,10 @@ pub fn router() -> Router<AppState> {
         .route("/agent/cancel", post(agent_cancel))
         .route("/agent/permission", post(agent_permission))
         .route("/agent/models", get(agent_models))
+        .route("/settings/providers", get(providers_get).post(providers_post))
         .route("/shell/run", post(shell_run))
         .route("/shell/cancel", post(shell_cancel))
+        .route("/shell/input", post(shell_input))
         .route("/ws/agent", get(ws_agent))
 }
 
@@ -255,11 +257,64 @@ fn trim_history(history: &mut Vec<agent::Message>) {
     }
 }
 
-async fn agent_models() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "models": agent::model_catalog(),
-        "default": agent::normalize_model(""),
-    }))
+/// Live where possible: a configured gateway is asked what it actually serves,
+/// so every model the key grants shows up instead of a curated handful.
+async fn agent_models(State(st): State<AppState>) -> impl IntoResponse {
+    let settings = st.snapshot_settings();
+    Json(agent::model_groups_live(&settings).await)
+}
+
+#[derive(Deserialize)]
+struct ProviderBody {
+    provider: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Remove the stored key for this provider (fall back to env vars).
+    #[serde(default)]
+    clear: bool,
+}
+
+async fn providers_get(State(st): State<AppState>) -> impl IntoResponse {
+    let settings = st.snapshot_settings();
+    Json(agent::model_groups(&settings))
+}
+
+/// Save or clear one provider's credentials. Keys are written only to the
+/// user's config.json and never echoed back in any response.
+async fn providers_post(
+    State(st): State<AppState>,
+    Json(body): Json<ProviderBody>,
+) -> impl IntoResponse {
+    if agent::provider_def(&body.provider).is_none() {
+        return err(StatusCode::BAD_REQUEST, format!("unknown provider {}", body.provider));
+    }
+    {
+        let mut settings = st.settings.lock().unwrap();
+        let cfg = settings.providers.entry(body.provider.clone()).or_default();
+        if body.clear {
+            cfg.api_key = None;
+            cfg.base_url = None;
+        } else {
+            if let Some(k) = body.api_key.as_deref() {
+                let k = k.trim();
+                if !k.is_empty() {
+                    cfg.api_key = Some(k.to_string());
+                }
+            }
+            if let Some(u) = body.base_url.as_deref() {
+                let u = u.trim();
+                cfg.base_url = if u.is_empty() { None } else { Some(u.to_string()) };
+            }
+        }
+        if let Err(e) = settings.save() {
+            tracing::error!("saving config.json failed: {e:#}");
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "could not save settings");
+        }
+    }
+    let settings = st.snapshot_settings();
+    Json(agent::model_groups(&settings)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -307,7 +362,8 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
     {
         return err(StatusCode::CONFLICT, "an agent task is already running");
     }
-    let model = agent::normalize_model(body.model.as_deref().unwrap_or("")).to_string();
+    let settings = st.snapshot_settings();
+    let model = agent::normalize_model(body.model.as_deref().unwrap_or(""), &settings);
     let mode = orchestrator::Mode::parse(body.mode.as_deref().unwrap_or(""));
     let effort = agent::normalize_effort(body.effort.as_deref().unwrap_or("")).to_string();
     let cancel = CancellationToken::new();
@@ -335,24 +391,20 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         None
     };
 
-    let sandbox = st.sandbox.clone();
-    let events = st.agent_tx.clone();
+    let env = agent::RunEnv {
+        ws,
+        sandbox: st.sandbox.clone(),
+        events: st.agent_tx.clone(),
+        shell_tx: st.shell_tx.clone(),
+        shells: st.shells.clone(),
+        cancel: cancel.clone(),
+        settings,
+    };
     let prompt = body.prompt;
     tokio::spawn(async move {
         let _slot = RunSlot(st.running.clone());
-        let result = orchestrator::run_task(
-            prompt.clone(),
-            model,
-            mode,
-            effort,
-            ws,
-            sandbox,
-            events.clone(),
-            cancel.clone(),
-            history,
-            perm,
-        )
-        .await;
+        let result = orchestrator::run_task(prompt.clone(), model, mode, effort, env, history, perm)
+            .await;
         // The run slot is still held (dropped after this block), so no newer
         // run can have replaced the token: clearing unconditionally is safe.
         *st.cancel.lock().await = None;
@@ -372,15 +424,31 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
             }
         }
         if let Err(e) = result {
-            let _ = events.send(AgentEvent::Error { message: e.to_string() });
+            // A deliberate stop is not an error to the user; close the run
+            // cleanly so the UI resets instead of showing a red failure.
+            if cancel.is_cancelled() && e.to_string().contains("cancelled") {
+                let _ = st
+                    .agent_tx
+                    .send(AgentEvent::Done { summary: "Stopped".into() });
+            } else {
+                let _ = st.agent_tx.send(AgentEvent::Error { message: e.to_string() });
+            }
         }
     });
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Global stop: abort the LLM stream, kill every process tree the agent
+/// started (background jobs included), and release any pending approval gate.
+/// User terminals are deliberately untouched — only ids prefixed `agent`.
 async fn agent_cancel(State(st): State<AppState>) -> impl IntoResponse {
     if let Some(c) = st.cancel.lock().await.take() {
         c.cancel();
+    }
+    *st.active_perm.lock().await = None;
+    let killed = st.shells.cancel_prefixed("agent");
+    if killed > 0 {
+        tracing::info!("stop button killed {killed} agent job(s)");
     }
     Json(serde_json::json!({ "ok": true }))
 }
@@ -414,30 +482,29 @@ const BG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 60 *
 pub const EXIT_NOTE_STOPPED: &str = "\n[stopped]";
 pub const EXIT_NOTE_DONE: &str = "\n[exited code ";
 
-async fn next_shell_job(st: &AppState, id: &str, token: &CancellationToken) -> Option<u64> {
-    let gen = st.shell_gen.fetch_add(1, Ordering::Relaxed);
-    let mut jobs = st.shells.lock().unwrap();
-    if jobs.len() >= crate::state::MAX_SHELL_JOBS {
-        return None;
-    }
-    // A terminal runs one command at a time, so anything still registered under
-    // this id is stale — cancel it rather than orphaning its process tree.
-    if let Some(stale) = jobs.insert(id.to_string(), crate::state::ShellJob {
-        token: token.clone(),
-        gen,
-    }) {
-        stale.token.cancel();
-    }
-    Some(gen)
+async fn next_shell_job(
+    st: &AppState,
+    id: &str,
+    token: &CancellationToken,
+    stdin: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Option<u64> {
+    st.shells.begin(id, token, stdin)
 }
 
-/// Drop the registration only if it is still ours; a newer command on the same
-/// terminal has a higher generation number and must survive.
-fn release_shell_job(st: &AppState, id: &str, gen: u64) {
-    let mut jobs = st.shells.lock().unwrap();
-    if jobs.get(id).map(|j| j.gen) == Some(gen) {
-        jobs.remove(id);
-    }
+#[derive(Deserialize)]
+struct ShellInputBody {
+    id: String,
+    text: String,
+}
+
+/// Type into a running command. This is what makes prompting programs usable:
+/// without it `date` or `npm init` asked a question nobody could answer.
+async fn shell_input(
+    State(st): State<AppState>,
+    Json(body): Json<ShellInputBody>,
+) -> impl IntoResponse {
+    let ok = st.shells.write_stdin(&body.id, &body.text);
+    Json(serde_json::json!({ "ok": ok }))
 }
 
 async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> impl IntoResponse {
@@ -456,13 +523,26 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
     let mut sink = None;
     let token = CancellationToken::new();
     let mut gen = 0u64;
+    // Foreground runs get a live stdin pipe so the user can answer prompts.
+    // Background jobs do not: nobody is watching them, so EOF is kinder.
+    let mut stdin_source = None;
     if named {
-        match next_shell_job(&st, &body.id, &token).await {
+        let stdin_tx = if body.background {
+            None
+        } else {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            stdin_source = Some(rx);
+            Some(tx)
+        };
+        match next_shell_job(&st, &body.id, &token, stdin_tx).await {
             Some(g) => gen = g,
             None => {
                 return err(
                     StatusCode::TOO_MANY_REQUESTS,
-                    format!("too many running terminal jobs (max {})", crate::state::MAX_SHELL_JOBS),
+                    format!(
+                        "too many running terminal jobs (max {})",
+                        ide_core::ShellRegistry::MAX_JOBS
+                    ),
                 )
             }
         }
@@ -493,7 +573,7 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
         let shell_tx = st.shell_tx.clone();
         tokio::task::spawn(async move {
             let out = sandbox
-                .run_streaming(&ws, program, &args, timeout, &token, sink)
+                .run_streaming(&ws, program, &args, timeout, &token, sink, None)
                 .await;
             let note = match &out {
                 Ok(o) if token.is_cancelled() => EXIT_NOTE_STOPPED.to_string(),
@@ -501,7 +581,9 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
                 Err(_) => EXIT_NOTE_STOPPED.to_string(),
             };
             let _ = shell_tx.send(ide_core::ShellEvent::Chunk { id: id.clone(), text: note });
-            release_shell_job(&st, &id, gen);
+            st
+                .shells
+                .release(&id, gen);
         });
         return Json(serde_json::json!({
             "started": true,
@@ -513,11 +595,11 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
 
     let sandbox = st.sandbox.clone();
     let run = tokio::task::spawn(async move {
-        sandbox.run_streaming(&ws, program, &args, timeout, &token, sink).await
+        sandbox.run_streaming(&ws, program, &args, timeout, &token, sink, stdin_source).await
     })
     .await;
     if named {
-        release_shell_job(&st, &body.id, gen);
+        st.shells.release(&body.id, gen);
     }
     match run {
         Ok(Ok(out)) => Json(serde_json::json!({
@@ -538,10 +620,7 @@ async fn shell_cancel(
     State(st): State<AppState>,
     Json(body): Json<ShellCancelBody>,
 ) -> impl IntoResponse {
-    let job = st.shells.lock().unwrap().remove(&body.id);
-    if let Some(job) = job {
-        job.token.cancel();
-    }
+    st.shells.cancel_id(&body.id);
     Json(serde_json::json!({ "ok": true }))
 }
 

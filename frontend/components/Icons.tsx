@@ -20,11 +20,14 @@ import {
   RefreshCw,
   Search,
   Server,
+  Settings,
   SlidersHorizontal,
   Square,
   SquareTerminal,
   Trash2,
   Undo2,
+  Volume2,
+  VolumeX,
   X,
   type LucideProps,
 } from "lucide-react";
@@ -56,6 +59,9 @@ export const IconStop = (p: LucideProps) => <Square {...p} />;
 export const IconSearch = (p: LucideProps) => <Search {...p} />;
 export const IconArchive = (p: LucideProps) => <Archive {...p} />;
 export const IconUndo = (p: LucideProps) => <Undo2 {...p} />;
+export const IconGear = (p: LucideProps) => <Settings {...p} />;
+export const IconSpeak = (p: LucideProps) => <Volume2 {...p} />;
+export const IconSpeakOff = (p: LucideProps) => <VolumeX {...p} />;
 
 /** App wordmark glyph — six petals around a centre, no lucide equivalent. */
 export function IconMark({ className = "brand-mark" }: { className?: string }) {

@@ -5,6 +5,7 @@
 **/*.pdb
 .idea
 .vscode
+/.opencode/plans
 .env
 .env.*
 !.env.example

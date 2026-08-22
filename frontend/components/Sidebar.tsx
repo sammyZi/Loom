@@ -5,6 +5,7 @@ import {
   IconChevron,
   IconClose,
   IconFolder,
+  IconGear,
   IconMark,
   IconPanel,
   IconPlus,
@@ -43,6 +44,7 @@ export function Sidebar({
   onRenameSession,
   onArchiveSession,
   onClearAll,
+  onOpenSettings,
 }: {
   open: boolean;
   folder: string;
@@ -67,6 +69,8 @@ export function Sidebar({
   onRenameSession: (id: string, title: string) => void;
   onArchiveSession: (id: string) => void;
   onClearAll: () => void;
+  /** Providers & API keys; lives beside Clear all rather than in the top bar. */
+  onOpenSettings: () => void;
 }) {
   const [shut, setShut] = useState<Record<string, boolean>>({});
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -137,6 +141,72 @@ export function Sidebar({
           <IconFolder />
           Open folder
         </button>
+      </div>
+
+      {/* Above the search box: archived chats are a fixed drawer, not another
+          project in the scrolling list below. */}
+      <div className="proj proj-archived">
+        <div className="proj-head">
+          <button
+            className="proj-name arch-toggle"
+            onClick={() => onToggleArchiveView?.()}
+            aria-expanded={archiveOpen}
+            title="Show archived chats"
+          >
+            <IconChevron className={`proj-chev ${archiveOpen ? "" : "down"}`} />
+            <IconArchive className="arch-ico" />
+            Archived
+            {archived.length > 0 && <span className="arch-count">{archived.length}</span>}
+          </button>
+        </div>
+        {archiveOpen && (
+          <div className="proj-body arch-body">
+            {visibleArchived.length === 0 && <div className="sess-empty">No archived chats.</div>}
+            {visibleArchived.map((s) => (
+              <div className="sess" key={s.id}>
+                <span className="dot off" />
+                <button
+                  className="sess-open"
+                  title={`${s.title}\n${whenText(s.at)}\n${s.folder}`}
+                  onClick={() => onLoadArchivedSession?.(s)}
+                >
+                  <span className="sess-title">{s.title}</span>
+                </button>
+                <div className="sess-menu-wrap">
+                  <button
+                    className="icon-btn sess-dots"
+                    title="Archived chat actions"
+                    onClick={() => setMenuFor(menuFor === `a-${s.id}` ? null : `a-${s.id}`)}
+                  >
+                    <IconDots />
+                  </button>
+                  {menuFor === `a-${s.id}` && (
+                    <div className="menu">
+                      <button
+                        onClick={() => {
+                          setMenuFor(null);
+                          onUnarchive?.(s.id);
+                        }}
+                      >
+                        <IconUndo className="menu-ico" />
+                        Unarchive
+                      </button>
+                      <button
+                        className="menu-danger"
+                        onClick={() => {
+                          setMenuFor(null);
+                          onDeleteSession(s.id);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="side-search">
@@ -272,88 +342,35 @@ export function Sidebar({
           <div className="no-hits">Nothing found for “{query.trim()}”.</div>
         )}
 
-        <div className="proj proj-archived">
-          <div className="proj-head">
-            <button
-              className="proj-name arch-toggle"
-              onClick={() => onToggleArchiveView?.()}
-              aria-expanded={archiveOpen}
-              title="Show archived chats"
-            >
-              <IconChevron className={`proj-chev ${archiveOpen ? "" : "down"}`} />
-              <IconArchive className="arch-ico" />
-              Archived
-              {archived.length > 0 && <span className="arch-count">{archived.length}</span>}
-            </button>
-          </div>
-          {archiveOpen && (
-            <div className="proj-body">
-              {visibleArchived.length === 0 && <div className="sess-empty">No archived chats.</div>}
-              {visibleArchived.map((s) => (
-                <div className="sess" key={s.id}>
-                  <span className="dot off" />
-                  <button
-                    className="sess-open"
-                    title={`${s.title}\n${whenText(s.at)}\n${s.folder}`}
-                    onClick={() => onLoadArchivedSession?.(s)}
-                  >
-                    <span className="sess-title">{s.title}</span>
-                  </button>
-                  <div className="sess-menu-wrap">
-                    <button
-                      className="icon-btn sess-dots"
-                      title="Archived chat actions"
-                      onClick={() => setMenuFor(menuFor === `a-${s.id}` ? null : `a-${s.id}`)}
-                    >
-                      <IconDots />
-                    </button>
-                    {menuFor === `a-${s.id}` && (
-                      <div className="menu">
-                        <button
-                          onClick={() => {
-                            setMenuFor(null);
-                            onUnarchive?.(s.id);
-                          }}
-                        >
-                          <IconUndo className="menu-ico" />
-                          Unarchive
-                        </button>
-                        <button
-                          className="menu-danger"
-                          onClick={() => {
-                            setMenuFor(null);
-                            onDeleteSession(s.id);
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
       </div>
 
       <div className="side-foot">
-        <button
-          className={`clear-all ${confirmClear ? "armed" : ""}`}
-          onClick={() => {
-            if (!confirmClear) {
-              setConfirmClear(true);
-              setTimeout(() => setConfirmClear(false), 4000);
-              return;
-            }
-            setConfirmClear(false);
-            onClearAll();
-          }}
-          title="Delete every stored session, for all projects"
-        >
-          <IconTrash />
-          {confirmClear ? "Click again to delete all" : "Clear all sessions"}
-        </button>
+        <div className="side-foot-row">
+          <button
+            className={`clear-all ${confirmClear ? "armed" : ""}`}
+            onClick={() => {
+              if (!confirmClear) {
+                setConfirmClear(true);
+                setTimeout(() => setConfirmClear(false), 4000);
+                return;
+              }
+              setConfirmClear(false);
+              onClearAll();
+            }}
+            title="Delete every stored session, for all projects"
+          >
+            <IconTrash />
+            {confirmClear ? "Click again to delete all" : "Clear all sessions"}
+          </button>
+          <button
+            className="foot-gear"
+            onClick={onOpenSettings}
+            title="Providers & API keys"
+            aria-label="Providers and API keys"
+          >
+            <IconGear />
+          </button>
+        </div>
       </div>
     </aside>
   );

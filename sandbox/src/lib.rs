@@ -14,6 +14,11 @@ mod unsupported;
 /// `CommandOutput`, so a caller that does not care about progress can ignore it.
 pub type OutputSink = tokio::sync::mpsc::UnboundedSender<String>;
 
+/// Keystrokes for a running command's stdin. Without one the child gets no
+/// stdin at all, so anything that prompts (`date`, `npm init`) dies instead of
+/// waiting. Dropping the sender closes the pipe, which the child sees as EOF.
+pub type InputSource = tokio::sync::mpsc::UnboundedReceiver<String>;
+
 #[async_trait]
 pub trait Sandbox: Send + Sync {
     /// Run to completion, or until `timeout` elapses, or until `cancel` fires —
@@ -29,6 +34,7 @@ pub trait Sandbox: Send + Sync {
         timeout: Duration,
         cancel: &CancellationToken,
         on_output: Option<OutputSink>,
+        stdin: Option<InputSource>,
     ) -> Result<CommandOutput>;
 
     /// Wait for the whole output instead of following it. Most callers want this.
@@ -40,7 +46,7 @@ pub trait Sandbox: Send + Sync {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput> {
-        self.run_streaming(ws, program, args, timeout, cancel, None).await
+        self.run_streaming(ws, program, args, timeout, cancel, None, None).await
     }
 }
 

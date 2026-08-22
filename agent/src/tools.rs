@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 use anyhow::Result;
 use async_trait::async_trait;
-use ide_core::{AgentEvent, CommandOutput, WorkspaceRoot};
+use ide_core::{AgentEvent, CommandOutput, ShellEvent, ShellRegistry, WorkspaceRoot};
 use sandbox::Sandbox;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
@@ -44,6 +44,12 @@ pub struct ToolCtx {
     pub ws: WorkspaceRoot,
     pub sandbox: Arc<dyn Sandbox>,
     pub events: broadcast::Sender<AgentEvent>,
+    /// Terminal output channel: the agent's shell commands stream live into
+    /// the terminal panel's Agent tab under the id `"agent"`.
+    pub shell_tx: broadcast::Sender<ShellEvent>,
+    /// Registry of running commands, so background agent jobs are killable
+    /// from the terminal panel and by the global stop button.
+    pub shells: ShellRegistry,
     /// Present when every shell command needs explicit user approval first.
     pub perm: Option<PermGate>,
 }
@@ -810,17 +816,22 @@ impl Tool for RunCommand {
         "run_command"
     }
     fn description(&self) -> &'static str {
-        "Run a program in the workspace sandbox and wait for it to finish. Give the executable \
-         and args separately, not a shell line. Times out after 120s and the whole process tree \
-         is killed on return, so use it for installs, builds, tests and checks, never for a \
-         server or watcher that is meant to keep running."
+        "Run a program in the workspace sandbox. Output streams live into the terminal panel's \
+         Agent tab while it runs. Give program and args separately, not a shell line. Foreground \
+         calls wait for completion (120s cap, process tree killed on return) and suit installs, \
+         builds, tests and checks. For a dev server or watcher set background:true: the call \
+         returns immediately and the process keeps running until stopped from the terminal panel."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "program": { "type": "string", "description": "Executable name, e.g. cargo or git" },
-                "args": { "type": "array", "items": { "type": "string" } }
+                "program": { "type": "string", "description": "Executable name, e.g. npm or git" },
+                "args": { "type": "array", "items": { "type": "string" } },
+                "background": {
+                    "type": "boolean",
+                    "description": "Keep it running after returning (dev servers, watchers). Default false."
+                }
             },
             "required": ["program"]
         })
@@ -829,7 +840,7 @@ impl Tool for RunCommand {
         if cancel.is_cancelled() {
             anyhow::bail!("cancelled");
         }
-        let program = input["program"].as_str().unwrap_or("");
+        let program = input["program"].as_str().unwrap_or("").trim().to_string();
         if program.is_empty() {
             anyhow::bail!("program required");
         }
@@ -841,6 +852,7 @@ impl Tool for RunCommand {
                     .collect()
             })
             .unwrap_or_default();
+        let background = input["background"].as_bool().unwrap_or(false);
 
         // Manual mode: every shell command needs an explicit yes, the way
         // coding agents ask before touching a terminal.
@@ -863,8 +875,143 @@ impl Tool for RunCommand {
             }
         }
 
-        format_cmd(ctx.sandbox.run(&ctx.ws, program, &args, Duration::from_secs(120), cancel).await?)
+        if background {
+            self.spawn_background(ctx, &program, &args, cancel).await
+        } else {
+            self.run_foreground(ctx, &program, &args, cancel).await
+        }
     }
+}
+
+/// The id every agent shell chunk streams under; the terminal panel maps it to
+/// its read-only Agent tab.
+pub const AGENT_STREAM_ID: &str = "agent";
+
+fn echo_line(ws: &WorkspaceRoot, program: &str, args: &[String]) -> String {
+    format!("{}> {program} {}\n", ws.root().display(), args.join(" "))
+}
+
+impl RunCommand {
+    /// Stream output live into the Agent tab, wait for exit, hand the full
+    /// text back to the model.
+    async fn run_foreground(
+        &self,
+        ctx: &ToolCtx,
+        program: &str,
+        args: &[String],
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        send_chunk(ctx, echo_line(&ctx.ws, program, args).to_string());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let fwd_tx = ctx.shell_tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(text) = rx.recv().await {
+                let _ = fwd_tx.send(ShellEvent::Chunk { id: AGENT_STREAM_ID.into(), text });
+            }
+        });
+        let out = ctx
+            .sandbox
+            .run_streaming(&ctx.ws, program, args, Duration::from_secs(120), cancel, Some(tx), None)
+            .await;
+        drop_forwarder(forwarder).await;
+        match out {
+            Ok(o) => {
+                send_chunk(ctx, format!("\n[exited code {}]\n", o.exit_code));
+                format_cmd(o)
+            }
+            Err(e) => {
+                send_chunk(ctx, format!("\n[failed] {e}\n"));
+                Err(e)
+            }
+        }
+    }
+
+    /// Fire-and-forget for dev servers and watchers: registers under an id in
+    /// the shared registry (killable from the terminal panel or by Stop), then
+    /// returns at once so the model does not block on a server that never exits.
+    async fn spawn_background(
+        &self,
+        ctx: &ToolCtx,
+        program: &str,
+        args: &[String],
+        run_cancel: &CancellationToken,
+    ) -> Result<String> {
+        let job_id = format!("agent-bg-{}", uuid_like());
+        let child = CancellationToken::new();
+        // Two ways to die: the user kills this specific job, or the whole run
+        // is stopped — both funnel into the child token the sandbox watches.
+        let watcher = {
+            let child = child.clone();
+            let run_cancel = run_cancel.clone();
+            tokio::spawn(async move {
+                let _ = run_cancel.cancelled().await;
+                child.cancel();
+            })
+        };
+        // No stdin for agent jobs: nothing is watching to answer a prompt, so a
+        // closed pipe (EOF) is better than blocking until the timeout.
+        let Some(gen) = ctx.shells.begin(&job_id, &child, None) else {
+            anyhow::bail!("too many background jobs are already running");
+        };
+        // Its own tab, not the shared Agent one: a dev server keeps printing for
+        // as long as it lives, and every later command would be lost in it.
+        let label = format!("{program} {}", args.join(" "));
+        let _ = ctx.shell_tx.send(ShellEvent::Opened {
+            id: job_id.clone(),
+            label: label.trim().chars().take(28).collect(),
+        });
+        let _ = ctx.shell_tx.send(ShellEvent::Chunk {
+            id: job_id.clone(),
+            text: echo_line(&ctx.ws, program, args).to_string(),
+        });
+
+        let sandbox = ctx.sandbox.clone();
+        let ws = ctx.ws.clone();
+        let shell_tx = ctx.shell_tx.clone();
+        let shells = ctx.shells.clone();
+        let job_for_task = job_id.clone();
+        let stream_id = job_id.clone();
+        let program_owned = program.to_string();
+        let args_owned = args.to_vec();
+        // Background jobs outlive the HTTP call by design, so they get a long
+        // deadline instead of the foreground 120s.
+        const BG_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+        tokio::spawn(async move {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let fwd_tx = shell_tx.clone();
+            let forwarder = tokio::spawn(async move {
+                while let Some(text) = rx.recv().await {
+                    let _ = fwd_tx.send(ShellEvent::Chunk { id: stream_id.clone(), text });
+                }
+            });
+            let out = sandbox
+                .run_streaming(&ws, &program_owned, &args_owned, BG_TIMEOUT, &child, Some(tx), None)
+                .await;
+            drop_forwarder(forwarder).await;
+            watcher.abort();
+            let note = match out {
+                Ok(o) => format!("\n[exited code {}]\n", o.exit_code),
+                Err(_) => "\n[stopped]\n".to_string(),
+            };
+            let _ = shell_tx.send(ShellEvent::Chunk { id: job_for_task.clone(), text: note });
+            shells.release(&job_for_task, gen);
+        });
+
+        Ok(format!(
+            "started `{program}` in the background as job {job_id}; it now has its own tab in \
+             the terminal panel and keeps running after this reply — do not start it again. \
+             Its output there names the port it actually bound to; read that rather than \
+             assuming a default."
+        ))
+    }
+}
+
+async fn drop_forwarder(handle: tokio::task::JoinHandle<()>) {
+    handle.await.ok();
+}
+
+fn send_chunk(ctx: &ToolCtx, text: String) {
+    let _ = ctx.shell_tx.send(ShellEvent::Chunk { id: AGENT_STREAM_ID.into(), text });
 }
 
 #[async_trait]

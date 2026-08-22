@@ -5,11 +5,14 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import {
   Bot,
   Box,
-  BrainCircuit,
+  Check,
   Code,
   Gauge,
   Hand,
+  KeyRound,
   ListChecks,
+  Search,
+  Settings as SettingsIcon,
   ShieldCheck,
   Sparkles,
   Wand2,
@@ -17,6 +20,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { ProviderGroup } from "@/lib/api";
 
 // ----------------------------------------------------------------------
 // Transition Physics
@@ -34,6 +38,20 @@ interface Attachment {
   name: string;
   width?: number;
   height?: number;
+}
+
+/** Friendly display name for a "provider/model" selection id. */
+export function modelLabel(groups: ProviderGroup[] | undefined, id: string): string {
+  if (!groups) return id.includes("/") ? id.split("/")[1] : id;
+  for (const g of groups) {
+    const m = g.models.find((m) => m.id === id);
+    if (m) return m.label;
+  }
+  return id.includes("/") ? id.split("/").slice(1).join("/") : id;
+}
+
+function providerOf(id: string): string {
+  return id.split("/")[0] ?? "";
 }
 
 // ----------------------------------------------------------------------
@@ -69,16 +87,21 @@ function MorphingText({ text }: { text: string }) {
 
 function ModelIcon({ model, className }: { model: string; className?: string }) {
   const icons: Record<string, LucideIcon> = {
-    Flash: Zap,
-    Pro: BrainCircuit,
-    "Composer 2.5": Code,
-    "Gemini 3.5 Flash": Sparkles,
-    "GPT 5.5": Bot,
-    "Opus 4.8": Zap,
-    "GLM 5.2": Box,
+    deepseek: Zap,
+    anthropic: Sparkles,
+    openai: Bot,
+    google: Sparkles,
+    groq: Zap,
+    xai: Bot,
+    mistral: Code,
+    openrouter: Wand2,
+    together: Box,
+    fireworks: Zap,
+    cerebras: Zap,
+    ollama: Box,
+    lmstudio: Box,
   };
-
-  const Icon = icons[model] ?? Bot;
+  const Icon = icons[providerOf(model)] ?? Bot;
   return <Icon className={cn("object-contain", className)} strokeWidth={1.75} aria-hidden />;
 }
 
@@ -319,10 +342,15 @@ export interface PromptInputProps {
   ) => void;
   placeholder?: string;
   className?: string;
-  models?: string[];
+  /** Provider catalog from GET /agent/models; sections per provider. */
+  groups?: ProviderGroup[];
+  /** Selected model as "provider/model". */
+  modelId?: string;
+  onModelChange?: (id: string) => void;
+  onOpenSettings?: () => void;
   /** Run modes (Auto / Plan / Manual / Approve). */
   modes?: string[];
-  /** DeepSeek reasoning_effort levels. */
+  /** Reasoning effort levels. */
   efforts?: string[];
   defaultValue?: string;
   value?: string;
@@ -332,6 +360,258 @@ export interface PromptInputProps {
   busy?: boolean;
   onStop?: () => void;
 }
+
+/**
+ * Model picker grouped by provider, opencode-style. Unconfigured providers are
+ * greyed with a hint instead of hidden, so users discover what exists; a
+ * footer entry opens the settings modal where keys are entered.
+ *
+ * Search and arrow-key navigation are driven off one flattened list of the
+ * selectable rows, so what the keyboard walks is exactly what is on screen.
+ */
+/** Most rows the picker draws at once; the rest are reached by searching. */
+const MAX_ROWS = 60;
+
+function ModelPicker({
+  open,
+  onOpen,
+  onPick,
+  onOpenSettings,
+  groups,
+  value,
+}: {
+  open: boolean;
+  onOpen: () => void;
+  onPick: (v: string) => void;
+  onOpenSettings?: () => void;
+  groups: ProviderGroup[] | undefined;
+  value: string;
+}) {
+  const [query, setQuery] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const q = query.trim().toLowerCase();
+  // Flatten, then cap. A gateway reports 400+ models, and rendering every one
+  // made the panel slow to open and impossible to read; search is the way
+  // through a list that long, so the cap pushes you towards it.
+  const hits: { g: ProviderGroup; m: ProviderGroup["models"][number]; ready: boolean }[] = [];
+  let total = 0;
+  for (const g of groups ?? []) {
+    const ready = g.key_set || g.key_optional;
+    for (const m of g.models) {
+      if (
+        q &&
+        !m.label.toLowerCase().includes(q) &&
+        !m.id.toLowerCase().includes(q) &&
+        !g.label.toLowerCase().includes(q)
+      ) {
+        continue;
+      }
+      total += 1;
+      if (hits.length < MAX_ROWS) hits.push({ g, m, ready });
+    }
+  }
+  const capped = total > hits.length;
+
+  // Only rows that can actually be chosen, in display order.
+  const pickable = hits.filter((h) => h.ready).map((h) => h.m.id);
+
+  // Reopening starts clean, with the cursor on what is currently selected.
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const at = pickable.indexOf(value);
+    setCursor(at >= 0 ? at : 0);
+    const t = setTimeout(() => searchRef.current?.focus(), 40);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // A filter can shorten the list under the cursor; keep it in range.
+  useEffect(() => {
+    if (cursor > pickable.length - 1) setCursor(0);
+  }, [pickable.length, cursor]);
+
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector('[data-cursor="1"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [cursor, open, query]);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!pickable.length) return;
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setCursor((c) => (c + step + pickable.length) % pickable.length);
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const id = pickable[cursor];
+      if (id) onPick(id);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpen();
+        }}
+        className={cn(
+          "group flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-foreground/50 transition-all duration-200 outline-none hover:bg-accent/60 hover:text-foreground cursor-default",
+          open && "bg-accent/60 text-foreground"
+        )}
+        aria-label={`Select model. Current: ${modelLabel(groups, value)}`}
+      >
+        <ModelIcon model={value} className="size-3.5 opacity-70 group-hover:opacity-100 transition-opacity" />
+        <span className="text-xs font-semibold select-none">
+          <MorphingText text={modelLabel(groups, value)} />
+        </span>
+      </button>
+
+      <div
+        style={{ transformOrigin: "bottom left" }}
+        onKeyDown={onKeyDown}
+        className={cn(
+          "absolute bottom-full left-0 mb-2 z-50 w-80 rounded-xl border border-border bg-card/95 p-1 shadow-xl backdrop-blur-md flex flex-col transition-all duration-300 cursor-default",
+          open
+            ? "opacity-100 scale-100 translate-y-0 pointer-events-auto ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+            : "opacity-0 scale-95 translate-y-3 pointer-events-none"
+        )}
+      >
+        {/* Search row like opencode's model picker: always present, so typing
+            is the primary way through a long provider list. */}
+        <div className="picker-search">
+          <Search className="size-3.5 shrink-0 opacity-55" />
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            placeholder="Search models…"
+            spellCheck={false}
+            aria-label="Search models"
+          />
+        </div>
+
+        <div
+          ref={listRef}
+          className="model-picker-scroll prompt-scrollbar flex flex-col gap-0.5 max-h-72 overflow-y-auto pr-0.5"
+        >
+          {hits.map(({ g, m, ready }, i) => {
+            const selected = m.id === value;
+            const atCursor = ready && pickable[cursor] === m.id;
+            // One header per run of rows from the same provider. Driving it off
+            // the flat list keeps headers correct once the list is capped.
+            const head = i === 0 || hits[i - 1].g.id !== g.id;
+            return (
+              <div key={m.id} className="contents">
+                {head && (
+                  <div className="picker-group-head">
+                    <span>{g.label}</span>
+                    {ready ? (
+                      <span className="picker-dot ok" />
+                    ) : (
+                      // Locked providers used to be inert, leaving no way
+                      // forward from the picker. This jumps straight to keys.
+                      <button
+                        type="button"
+                        className="picker-key"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenSettings?.();
+                        }}
+                        title={`Add an API key (${g.env_keys.join(" or ")}) to use ${g.label}`}
+                      >
+                        <KeyRound className="size-2.5" />
+                        Add key
+                      </button>
+                    )}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  disabled={!ready}
+                  data-cursor={atCursor ? "1" : undefined}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => {
+                    const at = pickable.indexOf(m.id);
+                    if (at >= 0) setCursor(at);
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!ready) return;
+                    onPick(m.id);
+                  }}
+                  title={
+                    !ready
+                      ? "Needs an API key — open settings"
+                      : `${m.id}\n${m.hint ? `${m.hint} · ` : ""}${Math.round(m.context / 1000)}k context`
+                  }
+                  className={cn(
+                    "group relative flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-medium outline-none transition-colors cursor-default",
+                    atCursor && "bg-accent",
+                    selected ? "text-foreground" : "text-foreground/70",
+                    !ready && "opacity-45"
+                  )}
+                >
+                  <ModelIcon model={m.id} className="size-3.5 opacity-85 shrink-0" />
+                  <span className="truncate">{m.label}</span>
+                  {/* Gateways carry near-duplicate names, so the real id is the
+                      only way to tell two rows apart. */}
+                  <span className="picker-id">{m.id.slice(g.id.length + 1)}</span>
+                  {/* Kept mounted so the row width does not jump on select. */}
+                  <Check
+                    className={cn(
+                      "size-3.5 shrink-0 text-[color:var(--accent-hi)]",
+                      selected ? "opacity-100" : "opacity-0"
+                    )}
+                  />
+                </button>
+              </div>
+            );
+          })}
+          {!groups && (
+            <div className="px-2.5 py-3 text-xs text-muted-foreground">Loading models…</div>
+          )}
+          {groups && total === 0 && (
+            <div className="px-2.5 py-3 text-xs text-muted-foreground">
+              {query ? `No model matches “${query}”.` : "No models available."}
+            </div>
+          )}
+          {capped && (
+            <div className="picker-more">
+              {hits.length} of {total} — keep typing to narrow
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenSettings?.();
+          }}
+          className="mt-0.5 flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-medium text-foreground/60 outline-none hover:bg-accent hover:text-foreground cursor-default"
+        >
+          <SettingsIcon className="size-3.5 opacity-75" />
+          Provider settings
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Slim context-window usage indicator living in the composer's footer row. */
 
 /** One pill + dropdown. Used for model, run mode and reasoning effort. */
 function Picker({
@@ -350,8 +630,7 @@ function Picker({
   options: string[];
   renderIcon: (v: string, className?: string) => React.ReactNode;
   label: string;
-}) {
-  return (
+}) {  return (
     <div className="relative">
       <button
         type="button"
@@ -390,8 +669,9 @@ function Picker({
               e.stopPropagation();
               onPick(opt);
             }}
+            title={OPTION_HINTS[opt]}
             className={cn(
-              "group relative flex h-8 w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-xs font-medium outline-none transition-colors active:scale-[0.98] cursor-default hover:bg-accent",
+              "group relative flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-medium outline-none transition-colors cursor-default hover:bg-accent",
               opt === value ? "text-foreground" : "text-foreground/70"
             )}
           >
@@ -404,13 +684,31 @@ function Picker({
   );
 }
 
+/**
+ * Which modes can actually touch a terminal. "Approve" sounds like it prompts
+ * for approval but in fact withholds the shell entirely, which is why the agent
+ * would say it "can't launch processes" with no explanation.
+ */
+const OPTION_HINTS: Record<string, string> = {
+  Auto: "Plans, writes and runs commands itself. Use this to start dev servers.",
+  Plan: "Produces a plan only. Changes nothing, runs nothing.",
+  Manual: "One pass, full tools. Asks you before each shell command.",
+  Approve: "No shell at all — it lists the commands for you to run yourself.",
+  Low: "Least reasoning, fastest, cheapest.",
+  Medium: "Balanced reasoning.",
+  High: "Most reasoning, slowest.",
+};
+
 export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
   (
     {
       onSubmit,
       placeholder = "Ask anything",
       className,
-      models = ["GPT 5.5", "Opus 4.8", "Gemini 3.5 Flash", "Composer 2.5", "GLM 5.2"],
+      groups,
+      modelId,
+      onModelChange,
+      onOpenSettings,
       modes = ["Auto", "Plan", "Manual", "Approve"],
       efforts = ["Low", "Medium", "High"],
       defaultValue = "",
@@ -425,7 +723,8 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     const [expanded, setExpanded] = useState(false);
     const [isSmoothResize, setIsSmoothResize] = useState(false);
     const [localValue, setLocalValue] = useState(defaultValue);
-    const [selectedModel, setSelectedModel] = useState(models[0]);
+    const selectedModel = modelId ?? "";
+    const setSelectedModel = (id: string) => onModelChange?.(id);
     const [effortIndex, setEffortIndex] = useState(1);
     const [selectedMode, setSelectedMode] = useState(modes[0]);
     const [openPicker, setOpenPicker] = useState<null | "model" | "mode" | "effort">(null);
@@ -937,19 +1236,20 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                 expanded && !isRecording ? "opacity-100 blur-0 translate-y-0 pointer-events-auto" : "opacity-0 blur-sm translate-y-2 pointer-events-none"
               )}
             >
-              <Picker
+              <ModelPicker
                 open={openPicker === "model"}
                 onOpen={() => setOpenPicker(openPicker === "model" ? null : "model")}
                 onPick={(v) => {
                   setSelectedModel(v);
                   setOpenPicker(null);
                 }}
+                onOpenSettings={onOpenSettings}
+                groups={groups}
                 value={selectedModel}
-                options={models}
-                renderIcon={(v, c) => <ModelIcon model={v} className={c} />}
-                label="model"
               />
 
+              {/* Context usage lives in the ContextBar above the composer now:
+                  it is status, not an input control. */}
               <Picker
                 open={openPicker === "mode"}
                 onOpen={() => setOpenPicker(openPicker === "mode" ? null : "mode")}

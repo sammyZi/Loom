@@ -1,6 +1,6 @@
 "use client";
 
-import { IconBranch } from "@/components/Icons";
+import { IconBranch, IconCheck } from "@/components/Icons";
 import { useState } from "react";
 
 export type Git = { branch: string; files: { path: string; status: string }[] };
@@ -17,12 +17,24 @@ export function ContextBar({
   onCommit: (message: string) => Promise<void>;
 }) {
   const [msg, setMsg] = useState("");
-  const dirty = (git?.files.length ?? 0) > 0;
+  const [phase, setPhase] = useState<"idle" | "busy" | "done">("idle");
+  const files = git?.files.length ?? 0;
+  const dirty = files > 0;
+  const label = `${files} file${files === 1 ? "" : "s"}`;
 
   async function commit() {
-    if (!msg.trim()) return;
-    await onCommit(msg);
-    setMsg("");
+    const message = msg.trim();
+    if (!message || phase === "busy") return;
+    setPhase("busy");
+    try {
+      await onCommit(message);
+      setMsg("");
+      setPhase("done");
+      setTimeout(() => setPhase("idle"), 1600);
+    } catch {
+      // The page reports the error; keep the message so it can be retried.
+      setPhase("idle");
+    }
   }
 
   return (
@@ -38,22 +50,40 @@ export function ContextBar({
           <b className="stat-del">-{stat.del}</b>
         </span>
       )}
-      <span className="spacer" />
-      {dirty && (
-        <>
+      {/* No spacer: it and .ctx-commit both grew, so they split the free space
+          and squeezed the message field down to a couple of characters. The
+          commit block alone takes the slack now, via margin-left:auto. */}
+      {phase === "done" && (
+        <span className="ctx-done">
+          <IconCheck />
+          Committed
+        </span>
+      )}
+      {dirty && phase !== "done" && (
+        <div className="ctx-commit">
+          <span className="ctx-count" title={git?.files.map((f) => f.path).join("\n")}>
+            {label}
+          </span>
           <input
             className="ctx-msg"
             value={msg}
+            disabled={phase === "busy"}
             onChange={(e) => setMsg(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") commit();
+              if (e.key === "Escape") setMsg("");
             }}
-            placeholder={`Commit ${git?.files.length} file${git?.files.length === 1 ? "" : "s"}`}
+            placeholder="Commit message"
+            aria-label={`Commit message for ${label}`}
           />
-          <button className="btn btn-sm" disabled={!msg.trim()} onClick={commit}>
-            Commit
+          <button
+            className="btn btn-sm btn-primary"
+            disabled={!msg.trim() || phase === "busy"}
+            onClick={commit}
+          >
+            {phase === "busy" ? "Committing…" : "Commit"}
           </button>
-        </>
+        </div>
       )}
     </div>
   );

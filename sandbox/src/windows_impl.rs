@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
-    INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
     CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, TOKEN_ALL_ACCESS,
@@ -29,7 +29,7 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
 use windows::Win32::System::Pipes::CreatePipe;
-use windows::Win32::Storage::FileSystem::ReadFile;
+use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
     ResumeThread, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
@@ -53,17 +53,35 @@ impl crate::Sandbox for WindowsSandbox {
         timeout: Duration,
         cancel: &CancellationToken,
         on_output: Option<crate::OutputSink>,
+        stdin: Option<crate::InputSource>,
     ) -> Result<CommandOutput> {
         let ws = ws.clone();
         let program = program.to_string();
         let args = args.to_vec();
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
-            run_blocking(&ws, &program, &args, timeout, &cancel, on_output)
+            run_blocking(&ws, &program, &args, timeout, &cancel, on_output, stdin)
         })
         .await
         .context("sandbox join")?
     }
+}
+
+/// Scratch space for a run, kept inside the project so commands write next to
+/// the code they build. It self-ignores: a `*` gitignore inside the directory
+/// hides the whole thing from `git status` without editing the user's own
+/// .gitignore — otherwise every project the sandbox touched grew a permanent
+/// untracked folder, which also inflated the commit bar's changed-file count.
+fn scratch_dir(ws: &WorkspaceRoot) -> PathBuf {
+    let tmp = ws.root().join(".ide-ai-tmp");
+    if std::fs::create_dir_all(&tmp).is_err() {
+        return tmp;
+    }
+    let marker = tmp.join(".gitignore");
+    if !marker.exists() {
+        let _ = std::fs::write(&marker, "*\n");
+    }
+    tmp
 }
 
 fn run_blocking(
@@ -73,37 +91,137 @@ fn run_blocking(
     timeout: Duration,
     cancel: &CancellationToken,
     on_output: Option<crate::OutputSink>,
+    stdin: Option<crate::InputSource>,
 ) -> Result<CommandOutput> {
-    let exe = resolve_program(program).with_context(|| format!("find `{program}`"))?;
-    let tmp = ws.root().join(".ide-ai-tmp");
-    std::fs::create_dir_all(&tmp).ok();
-    let cmdline = command_line(&exe, args);
+    let resolved = resolve_program(program).with_context(|| format!("find `{program}`"))?;
+    let tmp = scratch_dir(ws);
+    let (exe, cmdline): (PathBuf, Vec<u16>) = if is_batch_script(&resolved) {
+        // The wrapped line is spliced together by hand: cmd's `/s /c` parsing
+        // expects raw inner quotes, and the CRT-style \" escaping used by
+        // `command_line` mangles them into a UNC-ish path ("The network path
+        // was not found").
+        let line = [
+            quote(&comspec().to_string_lossy()),
+            "/d".into(),
+            "/s".into(),
+            "/c".into(),
+            script_wrapped(&resolved, args),
+        ]
+        .join(" ");
+        (comspec(), wide(&line))
+    } else {
+        (resolved.clone(), command_line(&resolved, args))
+    };
     let env = env_block(ws, &tmp);
-    unsafe { spawn_and_wait(ws.root(), &exe, &cmdline, &env, timeout, cancel, on_output) }
+    unsafe { spawn_and_wait(ws.root(), &exe, &cmdline, &env, timeout, cancel, on_output, stdin) }
 }
 
+/// Windows PATHEXT semantics decide what an extensionless name can become:
+/// `.exe` beats script extensions, and the bare name itself is accepted only
+/// when it is a real executable image. Node ships an extensionless sh script
+/// named `npm` right next to `npm.cmd`; the old first-match-wins scan picked
+/// that script and every npm call died with "CreateProcessW".
 fn resolve_program(program: &str) -> Result<PathBuf> {
-    let p = PathBuf::from(program);
-    if p.is_file() {
-        return Ok(dunce::canonicalize(&p).unwrap_or(p));
+    let path = std::env::var("PATH").unwrap_or_default();
+    resolve_in_search_path(program, &path)
+}
+
+/// Split out so tests never mutate process-global `PATH` — cargo runs this
+/// crate's tests in parallel, and a swapped env var made `powershell` vanish
+/// mid-run for every other test.
+fn resolve_in_search_path(program: &str, search_path: &str) -> Result<PathBuf> {
+    let direct = PathBuf::from(program);
+    if program.contains('\\') || program.contains('/') {
+        if direct.is_file() {
+            return Ok(dunce::canonicalize(&direct).unwrap_or(direct));
+        }
+        bail!("executable not found: {program}");
     }
-    let mut names = vec![program.to_string()];
-    if !program.to_ascii_lowercase().ends_with(".exe") {
-        names.push(format!("{program}.exe"));
-        names.push(format!("{program}.cmd"));
-        names.push(format!("{program}.bat"));
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(';') {
-            for n in &names {
-                let c = Path::new(dir).join(n);
-                if c.is_file() {
-                    return Ok(dunce::canonicalize(&c).unwrap_or(c));
-                }
+    let has_ext = direct.extension().is_some();
+    let names: Vec<String> = if has_ext {
+        vec![program.to_string()]
+    } else {
+        let mut v: Vec<String> =
+            pathext().into_iter().map(|e| format!("{program}{e}")).collect();
+        // Last resort: the bare name, but only as a PE image (checked below),
+        // never as an arbitrary file that happens to sit on PATH.
+        v.push(program.to_string());
+        v
+    };
+    for dir in search_path.split(';') {
+        if dir.is_empty() {
+            continue;
+        }
+        for n in &names {
+            let c = Path::new(dir).join(n);
+            if !c.is_file() {
+                continue;
             }
+            if n == program && !is_executable_image(&c) {
+                continue;
+            }
+            return Ok(dunce::canonicalize(&c).unwrap_or(c));
         }
     }
+    if direct.is_file() && (has_ext || is_executable_image(&direct)) {
+        return Ok(dunce::canonicalize(&direct).unwrap_or(direct));
+    }
     bail!("executable not found: {program}")
+}
+
+/// `%PATHEXT%` lowercased, defaulting to the stock Windows order.
+fn pathext() -> Vec<String> {
+    let raw = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let mut out: Vec<String> = Vec::new();
+    for e in raw.split(';') {
+        let e = e.trim().to_ascii_lowercase();
+        if e.len() > 1 && e.starts_with('.') && !out.contains(&e) {
+            out.push(e);
+        }
+    }
+    if out.is_empty() {
+        out = [".com", ".exe", ".bat", ".cmd"].iter().map(|s| s.to_string()).collect();
+    }
+    out
+}
+
+/// A real PE image starts with "MZ". Anything else — sh scripts, text — cannot
+/// be launched by CreateProcessW and must lose to script extensions.
+fn is_executable_image(p: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 2];
+    std::fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && &magic == b"MZ"
+}
+
+fn is_batch_script(p: &Path) -> bool {
+    matches!(
+        p.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("cmd") | Some("bat")
+    )
+}
+
+fn comspec() -> PathBuf {
+    std::env::var_os("COMSPEC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:\\Windows\\System32\\cmd.exe"))
+}
+
+/// `cmd /d /s /c "<script> <args…>"`: `/s` makes cmd take the whole quoted
+/// remainder as one command line, so quoted paths inside survive intact. The
+/// inner quotes stay raw — cmd toggles on them itself.
+fn script_wrapped(script: &Path, args: &[String]) -> String {
+    let mut inner = quote(&script.to_string_lossy());
+    for a in args {
+        inner.push(' ');
+        inner.push_str(&quote(a));
+    }
+    format!("\"{inner}\"")
 }
 
 fn command_line(exe: &Path, args: &[String]) -> Vec<u16> {
@@ -193,6 +311,128 @@ mod quote_tests {
     }
 }
 
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn pathext_defaults_to_stock_windows_order() {
+        let exts = super::pathext();
+        let joined = exts.join(",");
+        assert!(joined.starts_with(".com,"), "{joined}");
+        assert!(joined.contains(".exe") && joined.contains(".cmd"), "{joined}");
+    }
+
+    #[test]
+    fn batch_scripts_are_detected_by_extension_only() {
+        assert!(super::is_batch_script(Path::new("C:\\x\\npm.CMD")));
+        assert!(super::is_batch_script(Path::new("C:\\x\\run.bat")));
+        assert!(!super::is_batch_script(Path::new("C:\\x\\node.exe")));
+        assert!(!super::is_batch_script(Path::new("C:\\x\\npm")));
+    }
+
+    #[test]
+    fn text_files_are_not_executable_images() {
+        let dir = std::env::temp_dir().join("ide-ai-sandbox-resolve-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = dir.join("npm");
+        std::fs::write(&sh, "#!/bin/sh\necho hi\n").unwrap();
+        assert!(!super::is_executable_image(&sh));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn script_command_line_wraps_in_cmd_s_semantics() {
+        let wrapped = super::script_wrapped(
+            Path::new("C:\\Program Files\\nodejs\\npm.cmd"),
+            &["run".into(), "build".into()],
+        );
+        // Raw inner quotes, one outer pair — never CRT \" escapes, which cmd
+        // misreads and turns into a UNC path.
+        assert_eq!(wrapped, "\"\"C:\\Program Files\\nodejs\\npm.cmd\" run build\"");
+    }
+
+    #[test]
+    fn comspec_falls_back_to_system_cmd() {
+        let p = super::comspec();
+        assert!(p.as_os_str().to_string_lossy().to_ascii_lowercase().contains("cmd.exe"));
+    }
+
+    /// A bare name resolves to its PATHEXT candidate, never to an
+    /// extensionless lookalike sitting in the same directory. This is the
+    /// exact shape of the npm failure: `npm` (sh script) vs `npm.cmd`.
+    #[test]
+    fn bare_name_never_resolves_to_a_non_image_file() {
+        let dir = std::env::temp_dir().join("ide-ai-sandbox-resolve-path-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = dir.join("fake-tool");
+        std::fs::write(&sh, "#!/bin/sh\necho hi\n").unwrap();
+
+        // Only the extensionless non-image exists: nothing may resolve.
+        let only_script = dir.to_str().unwrap().to_string();
+        assert!(super::resolve_in_search_path("fake-tool", &only_script).is_err());
+
+        // With a real image present the same lookup succeeds via .exe.
+        std::fs::copy(
+            super::comspec(),
+            dir.join("fake-tool.exe"),
+        )
+        .ok();
+        assert!(super::resolve_in_search_path("fake-tool", &only_script).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_resolves_through_pathext_candidates() {
+        let found = super::resolve_program("cmd").expect("cmd should resolve");
+        assert_eq!(
+            found.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()),
+            Some("exe".into())
+        );
+    }
+
+    /// The reported bug, end to end: Node ships an extensionless sh script
+    /// named `npm` beside `npm.cmd`, the old resolver picked the script and
+    /// CreateProcessW failed. Resolution must land on the batch file, and the
+    /// spawn must wrap it in cmd so `--version` actually runs.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn npm_resolves_to_the_batch_file_and_executes() {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let Ok(resolved) = super::resolve_in_search_path("npm", &path) else {
+            return; // no Node on this machine; nothing to prove
+        };
+        assert_eq!(
+            resolved.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()),
+            Some("cmd".into()),
+            "bare `npm` must resolve to npm.cmd, got {resolved:?}"
+        );
+
+        let dir = std::env::temp_dir().join("ide-ai-sandbox-npm-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = ide_core::WorkspaceRoot::open(&dir).unwrap();
+        let out = crate::native()
+            .run(
+                &ws,
+                "npm",
+                &["--version".into()],
+                Duration::from_secs(120),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("npm --version should spawn");
+        assert_eq!(out.exit_code, 0, "stderr: {:?}", out.stderr);
+        let v = out.stdout.trim();
+        assert!(
+            v.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "expected a semver on stdout, got {v:?} (stderr {:?})",
+            out.stderr
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 fn env_block(ws: &WorkspaceRoot, tmp: &Path) -> Vec<u16> {
     let mut pairs = crate::passthrough_env();
     pairs.extend(crate::deny_network_env());
@@ -221,6 +461,7 @@ unsafe fn spawn_and_wait(
     timeout: Duration,
     cancel: &CancellationToken,
     on_output: Option<crate::OutputSink>,
+    stdin: Option<crate::InputSource>,
 ) -> Result<CommandOutput> {
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -232,10 +473,16 @@ unsafe fn spawn_and_wait(
     let mut stdout_w = HANDLE::default();
     let mut stderr_r = HANDLE::default();
     let mut stderr_w = HANDLE::default();
+    let mut stdin_r = HANDLE::default();
+    let mut stdin_w = HANDLE::default();
     CreatePipe(&mut stdout_r, &mut stdout_w, Some(&sa), 0).context("stdout pipe")?;
     CreatePipe(&mut stderr_r, &mut stderr_w, Some(&sa), 0).context("stderr pipe")?;
+    CreatePipe(&mut stdin_r, &mut stdin_w, Some(&sa), 0).context("stdin pipe")?;
     SetHandleInformation(stdout_r, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).ok();
     SetHandleInformation(stderr_r, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).ok();
+    // Only the child inherits the read end; our write end must stay private or
+    // the pipe never reports EOF once we drop it.
+    SetHandleInformation(stdin_w, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).ok();
 
     let job = CreateJobObjectW(None, None).context("CreateJobObject")?;
     apply_job_limits(job)?;
@@ -245,7 +492,7 @@ unsafe fn spawn_and_wait(
         dwFlags: STARTF_USESTDHANDLES,
         hStdOutput: stdout_w,
         hStdError: stderr_w,
-        hStdInput: INVALID_HANDLE_VALUE,
+        hStdInput: stdin_r,
         ..Default::default()
     };
     let mut pi = PROCESS_INFORMATION::default();
@@ -302,6 +549,33 @@ unsafe fn spawn_and_wait(
 
     let _ = CloseHandle(stdout_w);
     let _ = CloseHandle(stderr_w);
+    // The child holds its own copy of the read end now.
+    let _ = CloseHandle(stdin_r);
+
+    // Feed keystrokes in on a thread. With no source we close the write end at
+    // once so a prompting command reads EOF and gives up, rather than blocking
+    // until the timeout with nobody able to answer it.
+    match stdin {
+        Some(mut rx) => {
+            let raw = stdin_w.0 as usize;
+            std::thread::spawn(move || {
+                let h = HANDLE(raw as *mut _);
+                while let Some(text) = rx.blocking_recv() {
+                    let bytes = text.into_bytes();
+                    let mut written = 0u32;
+                    if unsafe { WriteFile(h, Some(&bytes), Some(&mut written), None) }.is_err() {
+                        break;
+                    }
+                }
+                unsafe {
+                    let _ = CloseHandle(h);
+                }
+            });
+        }
+        None => {
+            let _ = CloseHandle(stdin_w);
+        }
+    }
 
     AssignProcessToJobObject(job, pi.hProcess).context("AssignProcessToJobObject")?;
     ResumeThread(pi.hThread);

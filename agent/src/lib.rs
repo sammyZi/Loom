@@ -1,10 +1,15 @@
 pub mod project;
+pub mod provider;
+pub mod settings;
 mod compact;
 mod context;
-mod deepseek;
 mod loop_;
 mod tools;
 
-pub use deepseek::{catalog as model_catalog, normalize_effort, normalize_model, Message};
-pub use loop_::run_agent;
+pub use loop_::{run_agent, RunEnv};
+pub use provider::{
+    groups_json as model_groups, groups_json_live as model_groups_live, normalize_effort,
+    normalize_model, provider_def, Message, DEFAULT_MODEL,
+};
+pub use settings::Settings;
 pub use tools::{PermGate, ToolCtx, ToolRegistry};

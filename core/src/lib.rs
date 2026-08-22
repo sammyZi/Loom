@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -116,6 +118,127 @@ pub enum FsEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShellEvent {
     Chunk { id: String, text: String },
+    /// A background job the client did not start — the agent's dev servers and
+    /// watchers. The terminal panel opens a tab for it so a long-running server
+    /// gets its own scrollback instead of interleaving into one shared Agent
+    /// tab, which made a second command unreadable.
+    Opened { id: String, label: String },
+}
+
+/// One in-flight terminal command, foreground or background. `gen` lets a
+/// finishing background task unregister only itself, never a newer command
+/// that reused the same terminal id.
+#[derive(Clone)]
+pub struct ShellJob {
+    pub token: tokio_util::sync::CancellationToken,
+    pub gen: u64,
+    /// Writes to the command's stdin, so a prompting command ("Enter the new
+    /// date:") can be answered from the terminal panel instead of hanging.
+    pub stdin: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+/// Registry of every running terminal command, keyed by terminal id. Shared by
+/// the HTTP layer (`/shell/cancel`), the agent's background runs, and the
+/// global stop button — one place to kill anything.
+#[derive(Clone)]
+pub struct ShellRegistry {
+    map: Arc<std::sync::Mutex<HashMap<String, ShellJob>>>,
+    gen: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Default for ShellRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShellRegistry {
+    /// Upper bound on simultaneous terminal jobs; mostly to stop a buggy
+    /// client from forking the machine through background runs.
+    pub const MAX_JOBS: usize = 24;
+
+    pub fn new() -> Self {
+        Self {
+            map: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            gen: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        }
+    }
+
+    /// Register `id` for this command. A terminal runs one command at a time,
+    /// so anything still registered under the same id is stale — it gets
+    /// cancelled rather than orphaned. Returns the generation number, or None
+    /// when the job cap is hit.
+    pub fn begin(
+        &self,
+        id: &str,
+        token: &tokio_util::sync::CancellationToken,
+        stdin: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Option<u64> {
+        let gen = self.gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut jobs = self.map.lock().unwrap();
+        if jobs.len() >= Self::MAX_JOBS && !jobs.contains_key(id) {
+            return None;
+        }
+        let job = ShellJob { token: token.clone(), gen, stdin };
+        if let Some(stale) = jobs.insert(id.to_string(), job) {
+            stale.token.cancel();
+        }
+        Some(gen)
+    }
+
+    /// Type into whatever this terminal is running. False when it is idle or
+    /// the command was started without a stdin pipe.
+    pub fn write_stdin(&self, id: &str, text: &str) -> bool {
+        let jobs = self.map.lock().unwrap();
+        match jobs.get(id).and_then(|j| j.stdin.as_ref()) {
+            Some(tx) => tx.send(text.to_string()).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Drop the registration only if it is still ours; a newer command on the
+    /// same terminal has a higher generation number and must survive.
+    pub fn release(&self, id: &str, gen: u64) {
+        let mut jobs = self.map.lock().unwrap();
+        if jobs.get(id).map(|j| j.gen) == Some(gen) {
+            jobs.remove(id);
+        }
+    }
+
+    /// Kill whatever this terminal is running. Idempotent: a terminal with
+    /// nothing in flight is a no-op, which is what closing an idle tab hits.
+    /// Works for background jobs too — that is how a dev server stops.
+    pub fn cancel_id(&self, id: &str) -> bool {
+        let job = self.map.lock().unwrap().remove(id);
+        match job {
+            Some(j) => {
+                j.token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Kill every job whose id starts with `prefix` — the global stop button
+    /// uses `"agent"` so user terminals are never touched.
+    pub fn cancel_prefixed(&self, prefix: &str) -> usize {
+        let mut jobs = self.map.lock().unwrap();
+        let killed: Vec<String> = jobs
+            .keys()
+            .filter(|k| k.as_str().starts_with(prefix))
+            .cloned()
+            .collect();
+        for k in &killed {
+            if let Some(j) = jobs.remove(k) {
+                j.token.cancel();
+            }
+        }
+        killed.len()
+    }
+
+    pub fn active_ids(&self) -> Vec<String> {
+        self.map.lock().unwrap().keys().cloned().collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

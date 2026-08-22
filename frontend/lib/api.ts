@@ -74,11 +74,51 @@ export const api = {
   /** Kill whatever terminal `id` is running. No-op if it is idle. */
   cancelShell: (id: string) =>
     req("/shell/cancel", { method: "POST", body: JSON.stringify({ id }) }),
-  models: () =>
-    req("/agent/models") as Promise<{
-      models: { id: string; label: string; hint: string }[];
-      default: string;
+  /** Type into a running command's stdin — how prompts get answered. */
+  shellInput: (id: string, text: string) =>
+    req("/shell/input", { method: "POST", body: JSON.stringify({ id, text }) }) as Promise<{
+      ok: boolean;
     }>,
+  /** Provider catalog grouped for the model picker + settings modal. */
+  models: () =>
+    req("/agent/models") as Promise<ModelCatalog>,
+  providerSettings: () =>
+    req("/settings/providers") as Promise<ModelCatalog>,
+  saveProvider: (provider: string, patch: ProviderPatch) =>
+    req("/settings/providers", {
+      method: "POST",
+      body: JSON.stringify({ provider, ...patch }),
+    }) as Promise<ModelCatalog>,
+};
+
+export type ModelEntry = {
+  id: string;
+  label: string;
+  hint: string;
+  context: number;
+};
+
+export type ProviderGroup = {
+  id: string;
+  label: string;
+  key_set: boolean;
+  key_optional: boolean;
+  kind: "openai" | "anthropic";
+  base_url: string;
+  default_base_url: string;
+  env_keys: string[];
+  models: ModelEntry[];
+};
+
+export type ModelCatalog = {
+  groups: ProviderGroup[];
+  default: string;
+};
+
+export type ProviderPatch = {
+  api_key?: string;
+  base_url?: string;
+  clear?: boolean;
 };
 
 /** Archived chats, for the sidebar's archive view. */
@@ -106,7 +146,10 @@ export type SessionLite = {
 };
 
 /** Terminal output pushed over /ws/shell while a command is still running. */
-export type ShellEvent = { type: "chunk"; id: string; text: string };
+export type ShellEvent =
+  | { type: "chunk"; id: string; text: string }
+  /** A background job the agent started; the panel opens a tab for it. */
+  | { type: "opened"; id: string; label: string };
 
 /**
  * Reconnecting WebSocket. The old sockets were created once and never

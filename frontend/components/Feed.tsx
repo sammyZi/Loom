@@ -1,7 +1,7 @@
 "use client";
 
 import { IconMark } from "@/components/Icons";
-import { CopyButton, Markdown } from "@/components/Markdown";
+import { CopyButton, Markdown, SpeakButton } from "@/components/Markdown";
 import { groupLog, secs, type LogItem } from "@/lib/log";
 import { useEffect, useRef } from "react";
 
@@ -12,7 +12,6 @@ export function Feed({
   phase,
   elapsed,
   tokens,
-  ctx,
   pending,
   onDecide,
 }: {
@@ -22,8 +21,6 @@ export function Feed({
   phase: string;
   elapsed: number;
   tokens: number;
-  /** Approximate context-window usage; null until the first agent turn. */
-  ctx?: { used: number; limit: number } | null;
   /** Open approval request (manual mode): the agent wants to run a command. */
   pending?: { id: string; program: string; args: string } | null;
   onDecide?: (allow: boolean) => void;
@@ -35,7 +32,7 @@ export function Feed({
   useEffect(() => {
     const el = ref.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [log, prompt, busy, ctx]);
+  }, [log, prompt, busy]);
 
   const groups = groupLog(log);
   return (
@@ -100,42 +97,12 @@ export function Feed({
             <span className="work-stats">
               {secs(elapsed)}
               {tokens > 0 && ` · ${tokens.toLocaleString()} tokens`}
-              {ctx && ` · ${ctxPercent(ctx)}% context`}
               {" · "}
               <span className="act-now">still thinking…</span>
             </span>
           </p>
         )}
-
-        {/* Context-window meter: how much of the model's window this session
-            has used, and how much is still free. Persists after the run. */}
-        {ctx && <CtxMeter used={ctx.used} limit={ctx.limit} />}
       </div>
-    </div>
-  );
-}
-
-function ctxPercent(ctx: { used: number; limit: number }) {
-  if (ctx.limit <= 0) return 0;
-  return Math.min(100, Math.round((ctx.used / ctx.limit) * 100));
-}
-
-function fmtK(n: number) {
-  if (n >= 1000) return `${Math.round(n / 100) / 10}k`;
-  return String(n);
-}
-
-export function CtxMeter({ used, limit }: { used: number; limit: number }) {
-  const pct = ctxPercent({ used, limit });
-  const free = Math.max(0, limit - used);
-  return (
-    <div className="ctx-meter" title="Approximate model context usage for this session">
-      <span className="ctx-bar" aria-hidden>
-        <span className={`ctx-fill ${pct >= 90 ? "hot" : ""}`} style={{ width: `${pct}%` }} />
-      </span>
-      <span className={`ctx-label ${pct >= 90 ? "hot" : ""}`}>
-        context {fmtK(used)} / {fmtK(limit)} · {fmtK(free)} left
-      </span>
     </div>
   );
 }
@@ -179,6 +146,7 @@ function Message({ item, live }: { item: LogItem; live: boolean }) {
         {!live && (
           <div className="event-actions">
             <CopyButton text={item.text} />
+            <SpeakButton text={item.text} />
           </div>
         )}
       </div>

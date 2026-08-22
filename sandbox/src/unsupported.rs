@@ -16,6 +16,7 @@ impl crate::Sandbox for UnsupportedSandbox {
         _timeout: Duration,
         _cancel: &CancellationToken,
         _on_output: Option<crate::OutputSink>,
+        _stdin: Option<crate::InputSource>,
     ) -> Result<CommandOutput> {
         bail!("OS-native sandbox is implemented for Windows only in v1")
     }

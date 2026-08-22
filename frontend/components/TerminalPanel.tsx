@@ -5,12 +5,11 @@ import {
   IconClose,
   IconCopy,
   IconMaximize,
-  IconPlay,
   IconPlus,
   IconStop,
 } from "@/components/Icons";
-import { api, connectWs, type AgentEvent, type ShellEvent } from "@/lib/api";
-import { errText, toolLabel } from "@/lib/log";
+import { api, connectWs, type ShellEvent } from "@/lib/api";
+import { errText } from "@/lib/log";
 import { useEffect, useRef, useState } from "react";
 
 /** `job` keys this terminal's running command on the server; it only has to be
@@ -22,8 +21,8 @@ let nextId = 1;
 
 const newJob = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-/** Backend notes appended to the stream when a background job leaves the world. */
-const EXIT_NOTE = /\[exited code \d+\]|\[stopped\]/;
+/** Backend notes appended to the stream when a job leaves the world. */
+const EXIT_NOTE = /\[exited code \d+\]|\[stopped\]|\[failed[^\]]*\]/;
 
 /**
  * Lowest unused "Terminal N". Naming off the tab count reused numbers: with
@@ -38,46 +37,43 @@ export function nextName(terms: { name: string }[]): string {
 }
 
 /**
- * Split a log into runs, flagging the `cwd> cmd` lines run() echoes so they can
- * be coloured like the live prompt instead of inheriting the output colour.
- * Consecutive output lines stay in one run, so a long log renders as a handful
- * of nodes rather than one span per line.
+ * Split a log into runs so it renders as a handful of nodes instead of one
+ * span per line. Three kinds come back:
+ *   prompt — an echoed `{cwd}> cmd` line, coloured like the live prompt
+ *   note   — an exit/stop/failure chip line from the backend
+ *   out    — ordinary output
  */
-export function splitLog(log: string, cwd: string): { prompt: boolean; text: string }[] {
+export type LogRun = { kind: "prompt" | "note" | "out"; text: string };
+
+export function splitLog(log: string, cwd: string): LogRun[] {
   const echo = `${cwd}> `;
   const lines = log.split("\n");
-  const runs: { prompt: boolean; text: string }[] = [];
+  const runs: LogRun[] = [];
   let buf = "";
+  const flush = () => {
+    if (buf) {
+      runs.push({ kind: "out", text: buf });
+      buf = "";
+    }
+  };
   for (let i = 0; i < lines.length; i++) {
     const nl = i < lines.length - 1 ? "\n" : "";
-    if (lines[i].startsWith(echo)) {
-      if (buf) {
-        runs.push({ prompt: false, text: buf });
-        buf = "";
-      }
-      runs.push({ prompt: true, text: lines[i] + nl });
-    } else {
-      buf += lines[i] + nl;
+    const line = lines[i];
+    if (line.startsWith(echo)) {
+      flush();
+      runs.push({ kind: "prompt", text: line + nl });
+      continue;
     }
+    // A note is only ever its own single line.
+    if (/^\[(exited code \d+|stopped|failed[^\]]*)\]\s*$/.test(line)) {
+      flush();
+      runs.push({ kind: "note", text: line + nl });
+      continue;
+    }
+    buf += line + nl;
   }
-  if (buf) runs.push({ prompt: false, text: buf });
+  flush();
   return runs;
-}
-
-/**
- * Fold one agent event into the Agent tab's log, ignoring everything that is
- * not shell work. Kept beside splitLog because both depend on the `cwd> ` echo
- * format run() writes — if one changes the other must follow.
- */
-export function appendAgentLog(prev: string, ev: AgentEvent, cwd: string): string {
-  if (ev.type === "tool_call" && ev.name === "run_command") {
-    return `${prev}${cwd}> ${toolLabel(ev.name, ev.input).detail}\n`;
-  }
-  if (ev.type === "tool_result" && ev.name === "run_command") {
-    if (!ev.output) return prev;
-    return prev + (ev.output.endsWith("\n") ? ev.output : `${ev.output}\n`);
-  }
-  return prev;
 }
 
 /** Log body shared by the agent section and the interactive terminals. */
@@ -85,10 +81,14 @@ function LogView({ log, cwd }: { log: string; cwd: string }) {
   return (
     <pre className="term-out">
       {splitLog(log, cwd).map((run, i) =>
-        run.prompt ? (
+        run.kind === "prompt" ? (
           <span key={i}>
             <span className="term-ps">{cwd}&gt;</span>
             {run.text.slice(cwd.length + 1)}
+          </span>
+        ) : run.kind === "note" ? (
+          <span key={i} className={EXIT_NOTE.test(run.text.trim()) ? "term-note" : undefined}>
+            {run.text}
           </span>
         ) : (
           run.text
@@ -121,9 +121,9 @@ export function TerminalPanel({
   const [active, setActive] = useState(1);
   const [cmd, setCmd] = useState("");
   const [copied, setCopied] = useState(false);
-  // When set, Enter starts the command as a background process that keeps
-  // running after the call returns — how dev servers stay alive here.
-  const [bgMode, setBgMode] = useState(false);
+  // What the user is typing at a *running* command, kept apart from `cmd` so
+  // switching between the two states never leaks half a command into stdin.
+  const [stdinDraft, setStdinDraft] = useState("");
   // Which terminal's job is in flight overall, so Ctrl+C still hits the one
   // that was started last even after switching tabs mid-run.
   const runningJob = useRef<string | null>(null);
@@ -135,6 +135,9 @@ export function TerminalPanel({
   const interrupted = useRef(new Set<string>());
   const bodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Autoscroll only while the user is already at the bottom; yanking the view
+  // down on every chunk made reading scrollback mid-run impossible.
+  const stick = useRef(true);
 
   const onAgent = active === AGENT_ID;
   const current = terms.find((t) => t.id === active) || terms[0];
@@ -147,7 +150,7 @@ export function TerminalPanel({
 
   useEffect(() => {
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [current?.log, agentLog, activeRunning]);
 
   useEffect(() => {
@@ -177,7 +180,21 @@ export function TerminalPanel({
   useEffect(() => {
     const stop = connectWs("/ws/shell", (data) => {
       const ev = data as ShellEvent;
-      if (!ev || ev.type !== "chunk") return;
+      if (!ev) return;
+      // The agent's background jobs get their own tab. Sharing one Agent tab
+      // meant a dev server's endless output buried every later command.
+      if (ev.type === "opened") {
+        setTerms((prev) => {
+          if (prev.some((t) => t.job === ev.id)) return prev;
+          nextId += 1;
+          return [
+            ...prev,
+            { id: nextId, name: ev.label || "job", log: "", job: ev.id, running: true },
+          ];
+        });
+        return;
+      }
+      if (ev.type !== "chunk") return;
       setTerms((prev) => {
         // Ignore chunks for terminals this window does not own, e.g. a second
         // window driving the same backend.
@@ -236,6 +253,17 @@ export function TerminalPanel({
     }
   }
 
+  /** Answer a prompting command. Echoes locally, because the child's own echo
+   *  is off on a pipe — without this you cannot see what you typed. */
+  function sendStdin(text: string) {
+    const job = runningJob.current;
+    if (!job) return;
+    const tab = terms.find((t) => t.job === job);
+    api.shellInput(job, `${text}\r\n`).catch(() => {});
+    if (tab) append(`${text}\n`, tab.id);
+    setStdinDraft("");
+  }
+
   /** Ctrl+C / the stop button: kill the running command, like a real terminal. */
   function interrupt() {
     const job = runningJob.current;
@@ -280,9 +308,8 @@ export function TerminalPanel({
         append(out, tab.id);
         if (!out.endsWith("\n")) append("\n", tab.id);
       }
-      if (r.exit_code !== 0 && !interrupted.current.has(tab.job)) {
-        append(`\nexit ${r.exit_code}\n`, tab.id);
-      }
+      // No exit-code line: a real shell prints nothing on failure, the command's
+      // own message is the report, and `exit 1` after it was just noise.
     } catch (e) {
       append(`${errText(e)}\n`, tab.id);
     }
@@ -354,6 +381,10 @@ export function TerminalPanel({
         className="term-body"
         ref={bodyRef}
         tabIndex={-1}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+        }}
         onClick={() => {
           // A drag to select output ends in a click. Focusing the prompt here
           // would drop that selection, which made the output impossible to copy.
@@ -394,32 +425,34 @@ export function TerminalPanel({
                   value={cmd}
                   onChange={(e) => setCmd(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") (bgMode ? runBg : run)();
+                    // No mode toggle cluttering the prompt: Shift+Enter is the
+                    // detached run, for dev servers that must outlive the call.
+                    if (e.key === "Enter") (e.shiftKey ? runBg : run)();
                   }}
                   spellCheck={false}
                   autoComplete="off"
                   aria-label="Terminal command"
-                  placeholder={bgMode ? "command (runs in background)" : undefined}
+                  title="Enter runs and waits · Shift+Enter keeps it running (dev servers)"
                 />
-                <button
-                  className={`icon-btn term-bg ${bgMode ? "on" : ""}`}
-                  title={
-                    bgMode
-                      ? "Enter will KEEP THIS RUNNING — for dev servers and watchers"
-                      : "Switch to keep-running mode: Enter starts the command in the background so servers stay alive"
-                  }
-                  aria-pressed={bgMode}
-                  onClick={() => setBgMode(!bgMode)}
-                >
-                  <IconPlay />
-                </button>
               </div>
             ) : (
+              // The command owns the screen while it runs, but it may be asking
+              // something ("Enter the new date:"), so the line stays typable.
               <div className="term-line">
                 <span className="act-live" />
-                <span className="term-idle">
-                  running… Ctrl+C or the square stops it
-                </span>
+                <input
+                  ref={inputRef}
+                  value={stdinDraft}
+                  onChange={(e) => setStdinDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    sendStdin(stdinDraft);
+                  }}
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-label="Send input to the running command"
+                  placeholder="type to answer a prompt · Ctrl+C stops"
+                />
                 <button
                   className="icon-btn term-stop"
                   title="Stop the running command"

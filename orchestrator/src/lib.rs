@@ -1,10 +1,6 @@
-use agent::{run_agent, Message, PermGate, ToolRegistry};
+use agent::{run_agent, Message, PermGate, RunEnv, ToolRegistry};
 use anyhow::Result;
-use ide_core::{AgentEvent, AgentRole, WorkspaceRoot};
-use sandbox::Sandbox;
-use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
+use ide_core::{AgentEvent, AgentRole};
 
 /// How much of the pipeline a run uses. Picked by the user in the composer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,16 +26,12 @@ impl Mode {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_task(
     prompt: String,
     model: String,
     mode: Mode,
     effort: String,
-    ws: WorkspaceRoot,
-    sandbox: Arc<dyn Sandbox>,
-    events: broadcast::Sender<AgentEvent>,
-    cancel: CancellationToken,
+    env: RunEnv,
     // Earlier turns of this chat session. Only the first agent of the task
     // sees it — later roles work within the task's own context.
     history: Vec<Message>,
@@ -47,9 +39,7 @@ pub async fn run_task(
     perm: Option<PermGate>,
 ) -> Result<String> {
     if mode == Mode::Plan {
-        let _ = events.send(AgentEvent::Status {
-            message: "planner".into(),
-        });
+        let _ = env.events.send(AgentEvent::Status { message: "planner".into() });
         return spawn_role(
             AgentRole::Planner,
             format!(
@@ -58,12 +48,9 @@ pub async fn run_task(
             ),
             model,
             effort,
-            ws,
-            sandbox,
-            events,
-            cancel,
             ToolRegistry::read_only(),
             true,
+            &env,
             history,
             None,
         )
@@ -71,20 +58,15 @@ pub async fn run_task(
     }
 
     if mode == Mode::Manual {
-        let _ = events.send(AgentEvent::Status {
-            message: "agent".into(),
-        });
+        let _ = env.events.send(AgentEvent::Status { message: "agent".into() });
         return spawn_role(
             AgentRole::Single,
             prompt,
             model,
             effort,
-            ws,
-            sandbox,
-            events,
-            cancel,
             ToolRegistry::full(),
             true,
+            &env,
             history,
             perm,
         )
@@ -92,29 +74,22 @@ pub async fn run_task(
     }
 
     if is_greeting(&prompt) {
-        let _ = events.send(AgentEvent::Status {
-            message: "agent".into(),
-        });
+        let _ = env.events.send(AgentEvent::Status { message: "agent".into() });
         return spawn_role(
             AgentRole::Single,
             prompt,
             model,
             effort,
-            ws,
-            sandbox,
-            events,
-            cancel,
             ToolRegistry::none(),
             true,
+            &env,
             history,
             None,
         )
         .await;
     }
 
-    let _ = events.send(AgentEvent::Status {
-        message: "planner".into(),
-    });
+    let _ = env.events.send(AgentEvent::Status { message: "planner".into() });
     let plan = spawn_role(
         AgentRole::Planner,
         format!(
@@ -132,12 +107,9 @@ pub async fn run_task(
         ),
         model.clone(),
         effort.clone(),
-        ws.clone(),
-        sandbox.clone(),
-        events.clone(),
-        cancel.clone(),
         ToolRegistry::read_only(),
         false,
+        &env,
         history,
         perm.clone(),
     )
@@ -147,9 +119,7 @@ pub async fn run_task(
     // instead of dragging a coder through the repo.
     if let Some(answer) = plan.trim_start().strip_prefix("NO_CODE:") {
         let answer = answer.trim().to_string();
-        let _ = events.send(AgentEvent::Done {
-            summary: answer.clone(),
-        });
+        let _ = env.events.send(AgentEvent::Done { summary: answer.clone() });
         return Ok(answer);
     }
 
@@ -162,39 +132,36 @@ pub async fn run_task(
         }
     };
     let coder_note = if mode == Mode::Approve {
-        "\n\nYou cannot run shell commands. If any command needs running, list it at the end \
-         under `Commands to run:` for the user to approve."
+        "\n\nApprove mode is on, so the shell is withheld from you on purpose — this is a mode \
+         setting, not a missing capability. List any commands that need running at the end under \
+         `Commands to run:`, and say in one line that switching the composer's mode to Auto or \
+         Manual lets you run them yourself."
     } else {
         ""
     };
 
     let mut last = String::new();
     for round in 0..3 {
-        if cancel.is_cancelled() {
+        if env.cancel.is_cancelled() {
             anyhow::bail!("cancelled");
         }
-        let _ = events.send(AgentEvent::Status {
-            message: format!("coder {}", round + 1),
-        });
+        let _ = env
+            .events
+            .send(AgentEvent::Status { message: format!("coder {}", round + 1) });
         last = spawn_role(
             AgentRole::Coder,
             format!("User task:\n{prompt}\n\nPlan:\n{plan}\n\nImplement now.{coder_note}"),
             model.clone(),
             effort.clone(),
-            ws.clone(),
-            sandbox.clone(),
-            events.clone(),
-            cancel.clone(),
             coder_tools(),
             false,
+            &env,
             Vec::new(),
             perm.clone(),
         )
         .await?;
 
-        let _ = events.send(AgentEvent::Status {
-            message: "reviewer".into(),
-        });
+        let _ = env.events.send(AgentEvent::Status { message: "reviewer".into() });
         let review = spawn_role(
             AgentRole::Reviewer,
             format!(
@@ -202,27 +169,20 @@ pub async fn run_task(
             ),
             model.clone(),
             effort.clone(),
-            ws.clone(),
-            sandbox.clone(),
-            events.clone(),
-            cancel.clone(),
             ToolRegistry::read_only(),
             false,
+            &env,
             Vec::new(),
             None,
         )
         .await?;
         last = review.clone();
         if review.to_ascii_uppercase().contains("APPROVED") {
-            let _ = events.send(AgentEvent::Done {
-                summary: review,
-            });
+            let _ = env.events.send(AgentEvent::Done { summary: review });
             return Ok(last);
         }
     }
-    let _ = events.send(AgentEvent::Done {
-        summary: last.clone(),
-    });
+    let _ = env.events.send(AgentEvent::Done { summary: last.clone() });
     Ok(last)
 }
 
@@ -288,22 +248,19 @@ async fn spawn_role(
     prompt: String,
     model: String,
     effort: String,
-    ws: WorkspaceRoot,
-    sandbox: Arc<dyn Sandbox>,
-    events: broadcast::Sender<AgentEvent>,
-    cancel: CancellationToken,
     tools: ToolRegistry,
     announce_done: bool,
+    env: &RunEnv,
     seed: Vec<Message>,
     perm: Option<PermGate>,
 ) -> Result<String> {
+    // A panicking role must degrade into an error, not kill the whole
+    // pipeline task silently.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String>>(1);
+    let env = env.clone();
     let handle = tokio::spawn(async move {
-        let r = run_agent(
-            role, prompt, model, ws, sandbox, events, cancel, tools, announce_done, effort, seed,
-            perm,
-        )
-        .await;
+        let r = run_agent(role, prompt, model, effort, tools, announce_done, &env, seed, perm)
+            .await;
         let _ = tx.send(r).await;
     });
     let out = rx

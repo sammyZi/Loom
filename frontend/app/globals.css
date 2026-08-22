@@ -228,6 +228,9 @@ body.dragging-col {
   border: 1px solid transparent;
 }
 .side-search:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+/* The generic .side-foot/.icon-btn svg rules were sizing this at 14–15px, which
+   read as a magnifier looming over a 13px input. */
+.side-search > svg { width: 13px; height: 13px; flex-shrink: 0; stroke-width: 1.8; opacity: 0.7; }
 .side-search input {
   flex: 1;
   min-width: 0;
@@ -398,40 +401,148 @@ body.dragging-col {
   }
 }
 
-/* Context-window meter under the chat feed. */
-.ctx-meter {
-  width: 100%;
-  max-width: 780px;
-  margin: 6px auto 2px;
-  display: flex;
+/* Context pill inside the composer footer: slim bar + percent, replacing the
+   wide meter that used to float between the git bar and the composer. */
+.ctx-pill {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  padding: 0 2px;
+  height: 22px;
+  border-radius: 999px;
+  cursor: default;
 }
-.ctx-bar {
-  flex: 0 1 180px;
+.ctx-pill-bar {
+  width: 56px;
   height: 4px;
   border-radius: 3px;
   background: var(--panel);
   overflow: hidden;
   display: block;
 }
-.ctx-fill {
+.ctx-pill-bar > span {
   display: block;
   height: 100%;
   border-radius: 3px;
   background: var(--muted);
   transition: width 240ms ease;
 }
-.ctx-fill.hot {
-  background: #e5484d;
-}
-.ctx-label {
-  font-size: 11.5px;
+.ctx-pill-pct {
+  font-size: 11px;
+  font-weight: 600;
   color: var(--muted);
   white-space: nowrap;
+  transition: color 240ms ease;
 }
-.ctx-label.hot {
+.ctx-pill.warm .ctx-pill-bar > span {
+  background: #e5a548;
+}
+.ctx-pill.warm .ctx-pill-pct {
+  color: #e5a548;
+}
+.ctx-pill.hot .ctx-pill-bar > span {
+  background: #e5484d;
+}
+.ctx-pill.hot .ctx-pill-pct {
   color: #e5484d;
+}
+
+/* Grouped model picker (opencode-style provider sections). */
+.picker-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px 3px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+.picker-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+.picker-dot.ok {
+  background: #46a758;
+}
+.picker-dot.missing {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--muted) 70%, transparent);
+}
+/* Shortcut out of a locked provider row, straight to where keys are entered. */
+.picker-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--muted);
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.picker-key:hover { background: var(--accent-soft); color: var(--accent-hi); border-color: transparent; }
+/* A divider rather than a nested box: the panel is already a card, and an
+   inset field inside it read as a box-in-a-box. */
+.picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 1px 2px 3px;
+  padding: 5px 7px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+.picker-search input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  outline: none;
+  font-size: 12px;
+  color: var(--text);
+}
+.picker-search input::placeholder { color: var(--faint); }
+/* The raw model id, right-aligned and quiet: gateways list many near-identical
+   display names, and the id is what actually distinguishes them. */
+.picker-id {
+  margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--faint);
+  font-family: var(--font-mono), ui-monospace, Consolas, monospace;
+}
+.picker-more {
+  padding: 7px 9px 4px;
+  font-size: 10.5px;
+  color: var(--faint);
+  text-align: center;
+}
+/* Headers stay visible while scrolling a long provider run. */
+.picker-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
+}
+
+/* Terminal note chips: exit codes, stops and spawn failures. */
+.term-note {
+  color: var(--muted);
+  font-style: italic;
 }
 
 /* Approval card (manual mode shell gate). */
@@ -637,6 +748,7 @@ body.dragging-col {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 7px 12px;
   margin-bottom: 6px;
   background: var(--bg-2);
@@ -659,6 +771,35 @@ body.dragging-col {
 .ctx-stat b { font-weight: 600; }
 .stat-add { color: var(--ok); }
 .stat-del { color: var(--danger); }
+/* The bar is width-capped, so the message field is what gives: without this the
+   Commit button was pushed past the right edge and clipped. Capped short so the
+   commit control stays a small corner of the bar rather than dominating it. */
+.ctx-commit { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; margin-left: auto; }
+/* min-width keeps it usable when the branch name is long; it grows into the
+   empty middle of the bar rather than collapsing to one character. */
+.ctx-commit .ctx-msg { flex: 1; width: auto; min-width: 120px; max-width: none; padding: 4px 9px; }
+.ctx-commit .btn { flex: none; }
+.ctx-done { margin-left: auto; }
+.ctx-count {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ctx-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 550;
+  animation: fade 0.18s var(--ease);
+}
+.ctx-done svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; }
+.ctx-msg:disabled { opacity: 0.6; }
 .ctx-msg {
   width: 190px;
   background: var(--bg);
@@ -1185,7 +1326,9 @@ body.dragging-col {
 
 /* ---------- floating PromptInput ---------- */
 .composer-shell { display: flex; justify-content: center; }
-.composer-wrap .ctx { max-width: 480px; margin: 0 auto 10px; }
+/* Matches the composer's own width so the two read as one stack. */
+.composer-wrap .ctx { max-width: 640px; margin: 0 auto 10px; }
+.ctx-repo, .ctx-branch { flex: none; }
 
 /* ---------- terminal prompt row ---------- */
 .term-in { border-top: 1px solid var(--border); background: var(--bg); }
@@ -1402,6 +1545,9 @@ body.dragging-col {
   transition: background 0.14s, color 0.14s, border-color 0.14s;
 }
 .copy-btn:hover { background: var(--hover); color: var(--text); border-color: var(--border); }
+.copy-btn:active { transform: scale(0.96); }
+/* Confirmation state, shared by Copied and while a reply is being read out. */
+.copy-btn.ok { color: var(--accent-hi); border-color: transparent; background: var(--accent-soft); }
 .copy-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .copy-float {
   position: absolute;
@@ -1449,6 +1595,52 @@ body.dragging-col {
   color: var(--muted);
   transition: background 0.14s, color 0.14s, border-color 0.14s;
 }
+/* Archived now sits with the nav items rather than inside the project list, so
+   it takes the nav's metrics instead of a project row's — otherwise it read as
+   a stray, half-sized project floating above the search box. */
+.proj-archived {
+  flex-shrink: 0;
+  margin: 0 8px 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.proj-archived .proj-head { height: auto; margin-top: 0; padding: 0; }
+.proj-archived .arch-toggle {
+  gap: 11px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+.proj-archived .arch-toggle:hover { background: var(--hover); color: var(--text); }
+.proj-archived .proj-chev { opacity: 1; }
+.proj-archived .arch-ico { margin-left: 0; }
+/* An open archive must not push the project list off screen. */
+.arch-body {
+  max-height: 30vh;
+  overflow-y: auto;
+  margin-top: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: #4d4d46 transparent;
+}
+.side-foot-row { display: flex; align-items: stretch; gap: 6px; }
+.side-foot-row .clear-all { flex: 1; min-width: 0; }
+.side-foot-row .clear-all:not(.armed) { justify-content: flex-start; }
+/* Same shell as .clear-all so the pair reads as one control, not two styles. */
+.foot-gear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.foot-gear:hover { background: var(--hover); color: var(--text-2); border-color: var(--border-2); }
+.foot-gear svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; }
 .clear-all svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; flex-shrink: 0; }
 .clear-all:hover { background: var(--hover); color: var(--text-2); border-color: var(--border-2); }
 .clear-all.armed {
@@ -1513,3 +1705,130 @@ body.dragging-col {
    Skip .feed-empty: it centres itself with `margin: auto`, and this rule
    outranks it, replacing the auto bottom and pinning it to the composer. */
 .feed-col > *:last-child:not(.feed-empty) { margin-bottom: 4px; }
+
+/* ---------- provider settings modal ---------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: fade-in 160ms ease;
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+}
+.settings-modal {
+  width: min(520px, 100%);
+  max-height: min(78vh, 640px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-2, var(--border));
+  border-radius: 16px;
+  box-shadow: 0 24px 60px -12px rgb(0 0 0 / 0.45);
+  overflow: hidden;
+  animation: pop-in 180ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+}
+.settings-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14.5px;
+  font-weight: 700;
+}
+.settings-title svg { width: 15px; height: 15px; color: var(--accent); }
+.settings-sub {
+  padding: 0 16px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.settings-list {
+  overflow-y: auto;
+  padding: 8px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* Collapsed by default: the row is a single clickable line, and only the one
+   being edited grows inputs. */
+.settings-row { border-radius: 10px; }
+.settings-row + .settings-row { border-top: 1px solid var(--border); }
+.settings-row.open { background: color-mix(in srgb, var(--panel) 55%, transparent); }
+.settings-row.off .settings-name { color: var(--muted); }
+.settings-row-head {
+  width: 100%;
+  padding: 9px 8px;
+  border: 0;
+  background: none;
+  border-radius: 10px;
+  text-align: left;
+  transition: background 0.14s;
+}
+.settings-row-head:hover { background: color-mix(in srgb, var(--panel) 70%, transparent); }
+.settings-chev {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--faint);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  transition: transform 0.18s var(--ease);
+}
+.settings-chev.down { transform: rotate(90deg); }
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 2px 8px 10px;
+  animation: rise 0.16s var(--ease) both;
+}
+.settings-status.want { color: var(--faint); }
+.settings-row input {
+  background: var(--bg, #111);
+  border: 1px solid var(--border-2, var(--border));
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: var(--text);
+  outline: none;
+}
+.settings-row input:focus { border-color: var(--accent); }
+.settings-row-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.settings-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.settings-status { margin-left: auto; font-size: 11px; color: var(--muted); }
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-actions .btn-sm.ghost {
+  background: transparent;
+  border-color: var(--border-2, var(--border));
+  color: var(--muted);
+}
+.settings-hint { font-size: 11px; color: var(--muted); }
+
+/* Model picker scroll area uses a thin scrollbar like the prompt textarea */
+.model-picker-scroll::-webkit-scrollbar { width: 4px; background: transparent; }
+.model-picker-scroll::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.model-picker-scroll:hover::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / 0.3); }
