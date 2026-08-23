@@ -6,7 +6,7 @@ on your machine, with your own provider keys.
 
 ```bash
 cargo build -p cli
-./target/debug/ide-ai.exe        # serves http://127.0.0.1:8080 and opens a browser
+./target/debug/ide-ai.exe        # opens the Loom window (serves http://127.0.0.1:8080)
 ```
 
 Windows only for now: the sandbox is built on Job Objects and restricted tokens
