@@ -267,6 +267,9 @@ pub enum AgentEvent {
     /// The agent's task list for a multi-step job, resent whole on every
     /// change so the UI never has to reconcile a partial update.
     Todos { items: Vec<TodoItem> },
+    /// Point the Browser panel at a URL — how the agent shows the user the app
+    /// it just started.
+    Browse { url: String },
     /// Completion tokens reported by the provider for one model call.
     Usage { tokens: u64 },
     Done { summary: String },

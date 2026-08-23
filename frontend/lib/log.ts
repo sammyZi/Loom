@@ -83,11 +83,31 @@ export function mergeLog(prev: LogItem[], line: LogItem): LogItem[] {
 /** Fold runs of tool calls into one collapsible line. */
 export function groupLog(log: LogItem[]): Group[] {
   const out: Group[] = [];
+  // One reasoning block per turn. The model thinks, calls tools, thinks again —
+  // which produced a separate "Thinking" row each time and read as the same
+  // thing repeating. It is one continuous stream, so it gets one block, reset
+  // when the user speaks again.
+  let think: LogItem | null = null;
   for (const l of log) {
     // A turn that produced only tool calls leaves an empty text item behind.
     // Rendered, it is an invisible block with a copy button wedged between tool
     // groups, and it also stops adjacent groups from merging.
     if (l.kind !== "tool" && !l.text.trim()) continue;
+    if (l.kind === "user") {
+      think = null;
+      out.push(l);
+      continue;
+    }
+    if (l.kind === "think") {
+      if (think) {
+        // Copied on first sight, so appending never mutates the caller's log.
+        think.text += `\n${l.text}`;
+        continue;
+      }
+      think = { ...l };
+      out.push(think);
+      continue;
+    }
     if (l.kind !== "tool") {
       out.push(l);
       continue;

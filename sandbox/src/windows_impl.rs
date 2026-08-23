@@ -73,15 +73,34 @@ impl crate::Sandbox for WindowsSandbox {
 /// .gitignore — otherwise every project the sandbox touched grew a permanent
 /// untracked folder, which also inflated the commit bar's changed-file count.
 fn scratch_dir(ws: &WorkspaceRoot) -> PathBuf {
-    let tmp = ws.root().join(".ide-ai-tmp");
-    if std::fs::create_dir_all(&tmp).is_err() {
-        return tmp;
+    // Deliberately OUTSIDE the project. A scratch folder in the workspace root
+    // broke every tool that insists on an empty directory — `create-next-app`
+    // refuses to scaffold into one — and showed up as untracked noise in git.
+    // Keyed by the workspace path so two projects never share a TEMP.
+    let dir = std::env::temp_dir().join("ide-ai").join(workspace_key(ws.root()));
+    if std::fs::create_dir_all(&dir).is_ok() {
+        return dir;
     }
-    let marker = tmp.join(".gitignore");
-    if !marker.exists() {
-        let _ = std::fs::write(&marker, "*\n");
-    }
-    tmp
+    // Fall back to the process temp dir rather than failing the whole command.
+    std::env::temp_dir()
+}
+
+/// Short, stable, filesystem-safe id for a workspace path. Case-insensitive and
+/// separator-insensitive, since `D:\p\x` and `d:/p/x` are the same folder here.
+fn workspace_key(root: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let norm = root.to_string_lossy().to_ascii_lowercase().replace('\\', "/");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    norm.hash(&mut h);
+    let leaf = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ws")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(24)
+        .collect::<String>();
+    format!("{leaf}-{:016x}", h.finish())
 }
 
 fn run_blocking(

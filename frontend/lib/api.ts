@@ -68,7 +68,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ cmd, id, background }),
     }) as Promise<
-      | { exit_code: number; stdout: string; stderr: string }
+      /** `cwd` is where the server actually ran it, not where the client thought. */
+      | { exit_code: number; stdout: string; stderr: string; cwd?: string }
       | { started: true; background: true; id: string }
     >,
   /** Kill whatever terminal `id` is running. No-op if it is idle. */
@@ -80,6 +81,8 @@ export const api = {
       ok: boolean;
     }>,
   /** Provider catalog grouped for the model picker + settings modal. */
+  /** Skills visible from the open workspace, project ones first. */
+  skills: () => req("/agent/skills") as Promise<{ skills: SkillInfo[] }>,
   /** Agent catalog: primaries for the composer picker, subagents for `@`. */
   agents: () =>
     req("/agent/agents") as Promise<{ agents: AgentInfo[]; default: string }>,
@@ -230,11 +233,15 @@ export type AgentEvent =
   | { type: "context"; used: number; limit: number }
   /** The agent's task list for a multi-step job; resent whole on each change. */
   | { type: "todos"; items: TodoItem[] }
+  /** Point the Browser panel at a URL. */
+  | { type: "browse"; url: string }
   | { type: "usage"; tokens: number }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };
 
 export type TodoItem = { text: string; status: "pending" | "running" | "done" };
+
+export type SkillInfo = { name: string; description: string; path: string };
 
 export type AgentInfo = {
   id: string;

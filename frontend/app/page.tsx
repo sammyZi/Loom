@@ -1,6 +1,7 @@
 "use client";
 
 import { Composer, type SubmitMeta } from "@/components/Composer";
+import { BrowserPanel } from "@/components/BrowserPanel";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
@@ -18,7 +19,14 @@ import {
   type SessionLite,
   unarchiveSession,
 } from "@/lib/api";
-import { baseName, countDiff, errText, formatEvent, mergeLog, type LogItem } from "@/lib/log";
+import {
+  baseName,
+  countDiff,
+  errText,
+  formatEvent,
+  mergeLog,
+  type LogItem,
+} from "@/lib/log";
 import {
   archiveSession,
   clearAllSessions,
@@ -30,6 +38,9 @@ import {
   type Session,
 } from "@/lib/store";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+/** Placeholder name until the first message supplies a real one. */
+const NEW_CHAT_TITLE = "New chat";
 
 const MODEL_KEY = "ide-ai-model";
 const SIDE_KEY = "ide-ai-side";
@@ -78,6 +89,8 @@ export default function Page() {
   // The agent's plan for a multi-step job. Cleared per run, not per turn, so it
   // survives the tool calls in between.
   const [todos, setTodos] = useState<import("@/lib/api").TodoItem[]>([]);
+  // What the Browser panel is showing. Owned here so the agent can drive it.
+  const [browserUrl, setBrowserUrl] = useState("");
   // Archived chats view in the sidebar.
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archived, setArchived] = useState<SessionLite[]>([]);
@@ -279,8 +292,19 @@ export default function Page() {
     if (ev.type === "ask") {
       setPendingAsk({ id: ev.id, program: ev.program, args: ev.args });
     }
+    // No per-row "(cached)" marker. Results arrive after later calls have
+    // already been logged, and without a call id there is no honest way to pair
+    // them — marking the newest match put the label above the full read, and
+    // marking the oldest put it on the wrong row too. A label that is sometimes
+    // wrong is worse than none.
     if (ev.type === "todos") {
       setTodos(ev.items);
+    }
+    if (ev.type === "browse") {
+      // Show the agent's work without stealing the panel if the user is
+      // deliberately looking at the terminal or the diff.
+      setBrowserUrl(ev.url);
+      setPanel((p) => (p === "none" ? "browser" : p));
     }
     if (ev.type === "done" || ev.type === "error") {
       myRun.current = false;
@@ -312,17 +336,30 @@ export default function Page() {
    * keep the previous project's commands after a switch, which read like one
    * project's sessions bleeding into another.
    */
+  /**
+   * Start a chat and put it in the sidebar straight away. It used to exist only
+   * in memory until the first message was sent, so "New task" looked like it
+   * had done nothing. Clicking it again while the current chat is still empty
+   * reuses that one rather than stacking up blank rows.
+   */
   function newTask() {
     setLog([]);
     setPromptShown("");
-    setSessionId(null);
-    setSessionFolder(null);
     setAgentLog("");
     setTokens(0);
     exact.current = 0;
     streamed.current = 0;
     setPhase("");
     setErr("");
+    if (sessionId && log.length === 0) return;
+
+    const id = newSessionId();
+    setSessionId(id);
+    setSessionFolder(folder);
+    if (!folder) return;
+    saveSession({ id, folder, title: NEW_CHAT_TITLE, log: [], at: Date.now() })
+      .then(reloadSessions)
+      .catch(() => {});
   }  async function pick() {
     setErr("");
     try {
@@ -417,8 +454,19 @@ export default function Page() {
       setSessionFolder(folder);
     }
     // The session title stays the first message, so the sidebar name is stable.
+    const title = promptShown || text;
     if (!promptShown) setPromptShown(text);
-    setLog((prev) => [...prev, { kind: "user", text }]);
+    const withUser: LogItem[] = [...log, { kind: "user", text }];
+    setLog(withUser);
+    // Save on send, not on finish. The transcript used to be written only once
+    // a run settled, so a chat was missing from the sidebar for the whole time
+    // it was working — and lost entirely if the app closed mid-run.
+    const dir = sessionFolder ?? folder;
+    if (dir) {
+      saveSession({ id: sid, folder: dir, title, log: withUser, at: Date.now() })
+        .then(reloadSessions)
+        .catch(() => {});
+    }
     exact.current = 0;
     streamed.current = 0;
     setTokens(0);
@@ -628,6 +676,12 @@ export default function Page() {
           <TerminalPanel
             cwd={folder}
             agentLog={agentLog}
+            onWorkspaceDrift={(actual) => {
+              // Adopt the server's truth instead of arguing with it: it is the
+              // one that actually ran the command.
+              setFolder(actual);
+              refresh().catch(() => {});
+            }}
             maxed={maxed}
             onToggleMax={() => setMaxed((v) => !v)}
             onClose={() => {
@@ -635,10 +689,30 @@ export default function Page() {
               setMaxed(false);
             }}
           />
-        </div>        <div className={`shell-wrap ${panel === "diff" ? "" : "off"}`}>
+        </div>
+        <div className={`shell-wrap ${panel === "browser" ? "" : "off"} ${maxed ? "maxed" : ""}`}>
+          <BrowserPanel
+            url={browserUrl}
+            maxed={maxed}
+            onToggleMax={() => setMaxed((v) => !v)}
+            onNavigate={setBrowserUrl}
+            onClose={() => {
+              setPanel("none");
+              setMaxed(false);
+            }}
+          />
+        </div>
+        <div className={`shell-wrap ${panel === "diff" ? "" : "off"}`}>
           <DiffPanel
             diff={diff}
+            hasRepo={Boolean(git)}
             onRefresh={() => refresh().catch(() => {})}
+            onInit={async () => {
+              // Through the shell so it lands in the terminal like any other
+              // command, rather than happening invisibly.
+              await api.shell("git init", `init-${Date.now()}`).catch(() => {});
+              await refresh().catch(() => {});
+            }}
             onClose={() => setPanel("none")}
           />
         </div>

@@ -169,6 +169,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The bug this guards: the sandbox used to put its scratch dir inside the
+    /// project, which left `.ide-ai-tmp` as untracked noise and — worse — made
+    /// `create-next-app` refuse to scaffold, because it demands an empty
+    /// directory. Running a command must leave the workspace untouched.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn running_a_command_creates_nothing_in_the_workspace() {
+        use super::*;
+        use ide_core::WorkspaceRoot;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = std::env::temp_dir().join("ide-ai-clean-workspace-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = WorkspaceRoot::open(&dir).unwrap();
+
+        let out = native()
+            .run(
+                &ws,
+                "powershell",
+                &["-NoProfile".into(), "-Command".into(), "Write-Output ok".into()],
+                Duration::from_secs(60),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(out.stdout.contains("ok"), "command should have run: {out:?}");
+
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "workspace must stay empty so scaffolding tools work, found: {left:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The bug this guards: output only appeared once the command exited, so a
     /// long `ping` showed nothing but "running…" the whole time.
     #[cfg(windows)]

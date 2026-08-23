@@ -107,8 +107,11 @@ export function TerminalPanel({
   maxed,
   onToggleMax,
   onClose,
+  onWorkspaceDrift,
 }: {
   cwd: string;
+  /** The server ran in a different folder than this window has open. */
+  onWorkspaceDrift?: (actual: string) => void;
   /** Commands the agent ran, and their output. Read-only. */
   agentLog: string;
   maxed: boolean;
@@ -289,7 +292,10 @@ export function TerminalPanel({
     runningJob.current = tab.job;
     streamed.current.delete(tab.job);
     interrupted.current.delete(tab.job);
-    append(`${cwd}> ${line}${tag ? `  ${tag}` : ""}\n`, tab.id);
+    // The prompt echo comes back over the socket from the server, which knows
+    // the real working directory. Writing it here meant the line could claim a
+    // folder the command did not actually run in.
+    if (tag) append(`  ${tag}\n`, tab.id);
     return { tab };
   }
 
@@ -301,6 +307,10 @@ export function TerminalPanel({
     try {
       const r = await api.shell(line, tab.job);
       if ("started" in r) return; // background answered early; not a fg run
+      // The server reports where it actually ran. If that is not the folder
+      // this window thinks is open, another window changed it — say so rather
+      // than letting the prompt keep lying about it.
+      if (r.cwd && cwd && r.cwd !== cwd) onWorkspaceDrift?.(r.cwd);
       // Already printed live by the socket; only fall back to the response body
       // when nothing streamed (socket down, or a backend without /ws/shell).
       const out = streamed.current.has(tab.job) ? "" : `${r.stdout}${r.stderr}`;

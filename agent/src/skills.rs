@@ -47,9 +47,13 @@ pub fn parse_front_matter(text: &str) -> (Vec<(String, String)>, String) {
     };
     // The closing fence must be its own line, or a `---` rule inside the body
     // would truncate the skill.
-    let mut fields = Vec::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
     let mut body_start = None;
     let mut consumed = 0usize;
+    // Set while inside a `key: >` / `key: |` block; real SKILL.md files wrap
+    // long descriptions that way, and reading only the marker line left the
+    // description empty, which silently discarded the whole skill.
+    let mut folding: Option<(usize, bool)> = None; // (field index, keep newlines)
     for line in rest.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\r', '\n']);
         consumed += line.len();
@@ -57,12 +61,33 @@ pub fn parse_front_matter(text: &str) -> (Vec<(String, String)>, String) {
             body_start = Some(consumed);
             break;
         }
+        if let Some((idx, literal)) = folding {
+            let indented = trimmed.starts_with(' ') || trimmed.starts_with('\t');
+            if indented || trimmed.trim().is_empty() {
+                let piece = trimmed.trim();
+                let acc = &mut fields[idx].1;
+                if !piece.is_empty() {
+                    if !acc.is_empty() {
+                        acc.push(if literal { '\n' } else { ' ' });
+                    }
+                    acc.push_str(piece);
+                }
+                continue;
+            }
+            folding = None; // dedented: the block ended
+        }
         if let Some((k, v)) = trimmed.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
-            let val = v.trim().trim_matches(['"', '\'']).to_string();
-            if !key.is_empty() && !key.starts_with('#') {
-                fields.push((key, val));
+            if key.is_empty() || key.starts_with('#') {
+                continue;
             }
+            let val = v.trim();
+            if val == ">" || val == "|" || val == ">-" || val == "|-" {
+                fields.push((key, String::new()));
+                folding = Some((fields.len() - 1, val.starts_with('|')));
+                continue;
+            }
+            fields.push((key, val.trim_matches(['"', '\'']).to_string()));
         }
     }
     match body_start {
@@ -114,11 +139,18 @@ fn scan(root: &Path, out: &mut Vec<Skill>) {
 /// Every skill visible from this workspace, project before global, sorted by
 /// name so the tool description is stable between runs.
 pub fn discover(ws: &WorkspaceRoot) -> Vec<Skill> {
+    discover_in(ws, home_dir().as_deref())
+}
+
+/// Split out so tests never depend on the machine's home directory — installing
+/// a global skill used to break them, which is a fault in the test, not the
+/// skill. Pass None to scan the project only.
+pub fn discover_in(ws: &WorkspaceRoot, home: Option<&Path>) -> Vec<Skill> {
     let mut out = Vec::new();
     for d in PROJECT_DIRS {
         scan(&ws.root().join(d), &mut out);
     }
-    if let Some(home) = home_dir() {
+    if let Some(home) = home {
         for d in GLOBAL_DIRS {
             scan(&home.join(d), &mut out);
         }
@@ -152,15 +184,61 @@ pub fn load_body(skill: &Skill) -> anyhow::Result<String> {
     Ok(body.to_string())
 }
 
+/// How much skill text may ride along in the system prompt. Generous because
+/// the system prompt is the *cached* prefix — measured at ~94% reuse — so this
+/// is paid in full once per run and at roughly a tenth on every turn after.
+const PRELOAD_BUDGET: usize = 16_000;
+
+/// Skills loaded up front, plus the names that were loaded.
+///
+/// The `skill` tool alone meant a skill only applied when the model remembered
+/// to ask for it, which it often did not. Loading them at the start of the run
+/// makes them unconditional. Anything past the budget stays behind the tool.
+pub fn preload(ws: &WorkspaceRoot) -> (String, Vec<String>) {
+    let found = discover(ws);
+    let mut text = String::new();
+    let mut names = Vec::new();
+    let mut spent = 0usize;
+    for skill in &found {
+        let Ok(body) = load_body(skill) else { continue };
+        if spent + body.len() > PRELOAD_BUDGET {
+            continue;
+        }
+        spent += body.len();
+        names.push(skill.name.clone());
+        text.push_str(&format!(
+            "\n\n--- skill: {} ---\n{}\n--- end skill: {} ---",
+            skill.name, body, skill.name
+        ));
+    }
+    if text.is_empty() {
+        return (String::new(), names);
+    }
+    (
+        format!(
+            "\n\nThe following skills are active for this task. Follow them in place of your \
+             default approach; they are instructions, not reference material.{text}"
+        ),
+        names,
+    )
+}
+
 /// The catalogue line the model reads before choosing. Kept out of the system
 /// prompt and put in the tool description, so it costs nothing when the agent
 /// has no skills.
 pub fn catalogue(skills: &[Skill]) -> String {
-    if skills.is_empty() {
+    catalogue_excluding(skills, &[])
+}
+
+/// The catalogue, minus anything already loaded into the system prompt — the
+/// model should not be invited to fetch what it has already been given.
+pub fn catalogue_excluding(skills: &[Skill], loaded: &[String]) -> String {
+    let rest: Vec<&Skill> = skills.iter().filter(|k| !loaded.contains(&k.name)).collect();
+    if rest.is_empty() {
         return String::new();
     }
     let mut s = String::from("\n\nAvailable skills:\n");
-    for k in skills {
+    for k in rest {
         s.push_str(&format!("- {}: {}\n", k.name, k.description));
     }
     s
@@ -217,11 +295,94 @@ mod tests {
         assert!(body.contains("no closing fence"));
     }
 
+    /// Real SKILL.md files wrap long descriptions in a YAML block scalar. The
+    /// first parser read only the `>` marker, so the description came out empty
+    /// and the skill was thrown away as malformed.
+    #[test]
+    fn folded_block_descriptions_are_read_whole() {
+        let (f, body) = parse_front_matter(
+            "---\nname: ponytail\ndescription: >\n  Forces the laziest solution\n  that actually works.\nmode: all\n---\nBody.\n",
+        );
+        assert_eq!(field(&f, "name"), Some("ponytail"));
+        assert_eq!(
+            field(&f, "description"),
+            Some("Forces the laziest solution that actually works."),
+            "folded scalars join with spaces"
+        );
+        // a sibling key after the block is still parsed, not swallowed
+        assert_eq!(field(&f, "mode"), Some("all"));
+        assert_eq!(body.trim(), "Body.");
+    }
+
+    #[test]
+    fn literal_blocks_keep_their_line_breaks() {
+        let (f, _) = parse_front_matter("---\nname: x\ndescription: |\n  one\n  two\n---\nb\n");
+        assert_eq!(field(&f, "description"), Some("one\ntwo"));
+    }
+
     #[test]
     fn quotes_are_stripped_from_values() {
         let (f, _) = parse_front_matter("---\nname: \"pdf\"\ndescription: 'Reads PDFs'\n---\nb\n");
         assert_eq!(field(&f, "name"), Some("pdf"));
         assert_eq!(field(&f, "description"), Some("Reads PDFs"));
+    }
+
+    /// Skills only applied when the model remembered to fetch them, which it
+    /// often did not. Preloading makes them unconditional.
+    #[test]
+    fn preload_inlines_bodies_and_names_what_it_loaded() {
+        let root = std::env::temp_dir().join("ide-ai-preload-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join(".opencode/skills");
+        std::fs::create_dir_all(base.join("ponytail")).unwrap();
+        std::fs::write(
+            base.join("ponytail/SKILL.md"),
+            "---\nname: ponytail\ndescription: Laziest solution that works\n---\nPrefer stdlib.\n",
+        )
+        .unwrap();
+
+        let ws = WorkspaceRoot::open(&root).unwrap();
+        let (text, names) = preload(&ws);
+        assert_eq!(names, vec!["ponytail".to_string()]);
+        assert!(text.contains("Prefer stdlib."), "body must be inlined: {text}");
+        assert!(text.contains("--- skill: ponytail ---"), "{text}");
+        // Framed as instructions, not as something to consider.
+        assert!(text.contains("in place of your default approach"), "{text}");
+
+        // A preloaded skill drops out of the tool catalogue.
+        let found = discover_in(&ws, None);
+        assert!(catalogue_excluding(&found, &names).is_empty());
+        assert!(catalogue_excluding(&found, &[]).contains("ponytail"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A runaway shelf must not swallow the prompt: anything past the budget
+    /// stays behind the tool rather than being dropped silently.
+    #[test]
+    fn preload_stops_at_the_budget() {
+        let root = std::env::temp_dir().join("ide-ai-preload-budget-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join(".opencode/skills");
+        let big = "y".repeat(9_000);
+        for n in ["aaa", "bbb", "ccc"] {
+            std::fs::create_dir_all(base.join(n)).unwrap();
+            std::fs::write(
+                base.join(n).join("SKILL.md"),
+                format!("---\nname: {n}\ndescription: d\n---\n{big}\n"),
+            )
+            .unwrap();
+        }
+        let ws = WorkspaceRoot::open(&root).unwrap();
+        let (text, names) = preload(&ws);
+        assert_eq!(names.len(), 1, "9 KB each, 16 KB budget: only one fits");
+        assert!(text.len() < PRELOAD_BUDGET + 500, "budget respected");
+        // The ones that did not fit are still reachable through the tool.
+        let found = discover_in(&ws, None);
+        let rest = catalogue_excluding(&found, &names);
+        assert!(rest.contains("bbb") && rest.contains("ccc"), "{rest}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -259,7 +420,7 @@ mod tests {
         std::fs::write(base.join("bare/SKILL.md"), "---\nname: bare\n---\nbody\n").unwrap();
 
         let ws = WorkspaceRoot::open(&root).unwrap();
-        let found = discover(&ws);
+        let found = discover_in(&ws, None);
         assert_eq!(found.len(), 1, "got {found:?}");
         assert_eq!(found[0].name, "pdf");
         assert_eq!(load_body(&found[0]).unwrap(), "How to read a PDF.");

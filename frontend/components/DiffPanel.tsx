@@ -2,6 +2,7 @@
 
 import { IconChevron, IconClose, IconRefresh } from "@/components/Icons";
 import { baseName } from "@/lib/log";
+import { useState } from "react";
 
 type FileDiff = { path: string; lines: string[]; add: number; del: number };
 
@@ -40,14 +41,21 @@ export function splitDiff(diff: string): FileDiff[] {
 
 export function DiffPanel({
   diff,
+  hasRepo = true,
   onRefresh,
   onClose,
+  onInit,
 }: {
   diff: string;
+  /** False when the folder is not a git repo at all. */
+  hasRepo?: boolean;
   onRefresh: () => void;
   onClose: () => void;
+  /** Run `git init` in the workspace. */
+  onInit?: () => void;
 }) {
   const files = splitDiff(diff);
+  const [initing, setIniting] = useState(false);
 
   return (
     <div className="term">
@@ -63,7 +71,28 @@ export function DiffPanel({
         </button>
       </div>
 
-      {files.length === 0 ? (
+      {!hasRepo ? (
+        // "Working tree clean" was shown here too, which reads as "nothing has
+        // changed" when the truth is that nothing is being tracked at all.
+        <div className="panel-empty no-repo">
+          <p>This folder is not a git repository, so there are no changes to show.</p>
+          {onInit && (
+            <button
+              className="btn btn-sm btn-primary"
+              disabled={initing}
+              onClick={() => {
+                setIniting(true);
+                onInit();
+                // The panel re-renders from fresh git state; this only guards
+                // against a second click while that round-trip is in flight.
+                setTimeout(() => setIniting(false), 1500);
+              }}
+            >
+              {initing ? "Initialising…" : "Initialise repository"}
+            </button>
+          )}
+        </div>
+      ) : files.length === 0 ? (
         <div className="panel-empty">Working tree clean</div>
       ) : (
         <div className="diff-scroll">

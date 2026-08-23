@@ -787,6 +787,18 @@ impl SseAccumulator {
         if let Some(u) = v["usage"].as_object() {
             let input = u.get("prompt_tokens").and_then(|x| x.as_u64());
             let output = u.get("completion_tokens").and_then(|x| x.as_u64());
+            // Prompt caching is the single biggest lever on input cost — a hit
+            // is billed at roughly a tenth — but it is invisible unless the
+            // provider's own counters are read back. DeepSeek reports these
+            // directly; OpenAI nests the same idea under prompt_tokens_details.
+            let hit = u
+                .get("prompt_cache_hit_tokens")
+                .and_then(|x| x.as_u64())
+                .or_else(|| u["prompt_tokens_details"]["cached_tokens"].as_u64());
+            if let (Some(i), Some(h)) = (input, hit) {
+                let pct = if i > 0 { h * 100 / i } else { 0 };
+                tracing::info!("prompt cache: {h}/{i} input tokens reused ({pct}%)");
+            }
             if input.is_some() || output.is_some() {
                 on_event(StreamKind::Usage { input, output });
             }
@@ -841,18 +853,39 @@ async fn anthropic_stream(
     cancel: &CancellationToken,
     mut on_event: impl FnMut(StreamKind),
 ) -> Result<AssistantTurn> {
+    // Cache the two blocks that never change within a run: the system prompt
+    // and the tool schemas. Anthropic bills a cache read at about a tenth of a
+    // fresh input token, and this prefix is re-sent on every single turn of the
+    // agent loop — it is the largest repeated cost in the whole system.
+    // OpenAI-compatible providers do the same thing automatically on a stable
+    // prefix, which is why only this engine needs the markers.
+    let cached_system = json!([{
+        "type": "text",
+        "text": system,
+        "cache_control": { "type": "ephemeral" },
+    }]);
+    let mut tool_defs: Vec<Value> = tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t["name"],
+                "description": t["description"],
+                "input_schema": t["input_schema"],
+            })
+        })
+        .collect();
+    // The breakpoint goes on the last tool, so everything above it is cached.
+    if let Some(last) = tool_defs.last_mut() {
+        last["cache_control"] = json!({ "type": "ephemeral" });
+    }
     let body = json!({
         "model": model,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        "system": system,
+        "system": cached_system,
         "messages": to_anthropic_messages(messages),
         "stream": true,
         "temperature": if tools.is_empty() { 1.0 } else { 0.2 },
-        "tools": tools.iter().map(|t| json!({
-            "name": t["name"],
-            "description": t["description"],
-            "input_schema": t["input_schema"],
-        })).collect::<Vec<_>>(),
+        "tools": tool_defs,
     });
     let headers: Vec<(&str, String)> = vec![
         ("x-api-key", api_key.unwrap_or_default().to_string()),
@@ -877,7 +910,19 @@ async fn anthropic_stream(
                     anyhow::bail!(msg.to_string());
                 }
                 Some("message_start") => {
-                    let input = v["message"]["usage"]["input_tokens"].as_u64();
+                    let u = &v["message"]["usage"];
+                    let input = u["input_tokens"].as_u64();
+                    // Anthropic bills cache reads separately, so they are not
+                    // in input_tokens; without logging them a working cache
+                    // looks like a shrinking prompt rather than a cheaper one.
+                    let read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    let written = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    if read > 0 || written > 0 {
+                        tracing::info!(
+                            "prompt cache: {read} read, {written} written, {} fresh",
+                            input.unwrap_or(0)
+                        );
+                    }
                     if let Some(input) = input {
                         on_event(StreamKind::Usage { input: Some(input), output: None });
                     }

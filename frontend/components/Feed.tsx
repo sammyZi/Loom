@@ -39,6 +39,13 @@ export function Feed({
   }, [log, prompt, busy]);
 
   const groups = groupLog(log);
+  // groupLog leaves exactly one think group per turn. While the run is live the
+  // status line owns it and the flow skips it; when it settles the flow keeps
+  // it as the record. Either way it is on screen once — the index is what ties
+  // the two together, so they can never both decide to show it.
+  const thinkAt = groups.findIndex((g) => !("items" in g) && g.kind === "think");
+  const thinkGroup = thinkAt >= 0 ? (groups[thinkAt] as LogItem) : null;
+  const liveThink = busy && thinkGroup ? thinkGroup.text : "";
   return (
     <div
       className="feed"
@@ -63,13 +70,16 @@ export function Feed({
           </div>
         )}
 
-        {groups.map((g, i) =>
-          "items" in g ? (
-            <ToolLine key={i} items={g.items} running={busy && i === groups.length - 1} />
+        {groups.map((g, i) => {
+          const last = i === groups.length - 1;
+          // Skipped only while the status line is showing it.
+          if (busy && i === thinkAt) return null;
+          return "items" in g ? (
+            <ToolLine key={i} items={g.items} running={busy && last} />
           ) : (
-            <Message key={i} item={g} live={busy && i === groups.length - 1} />
-          ),
-        )}
+            <Message key={i} item={g} live={busy && last} />
+          );
+        })}
 
         {/* Approval gate (manual mode): nothing runs until the user picks. */}
         {pending && (
@@ -95,33 +105,60 @@ export function Feed({
 
         {/* The plan, above the status line: on a long job this is the only
             thing that says how much is left. */}
-        {todos.length > 0 && (
-          <div className="todos">
-            {todos.map((t, i) => (
-              <div key={i} className={`todo ${t.status}`}>
-                <span className="todo-mark" aria-hidden>
-                  {t.status === "done" ? "✓" : t.status === "running" ? "→" : "○"}
-                </span>
-                <span className="todo-text">{t.text}</span>
-              </div>
-            ))}
-          </div>
-        )}
+        {todos.length > 0 && <TodoList todos={todos} />}
 
         {busy && !pending && (
-          <p className="working">
-            <span className="work-mark">
-              <IconMark />
-            </span>
-            <span className="work-stats">
-              {secs(elapsed)}
-              {tokens > 0 && ` · ${tokens.toLocaleString()} tokens`}
-              {" · "}
-              <span className="act-now">still thinking…</span>
-            </span>
-          </p>
+          // Expandable in place: "still thinking…" is where the eye already is
+          // when you want to know what it is thinking, so the reasoning opens
+          // here rather than sending you hunting up the transcript.
+          <details className="working-wrap">
+            <summary className="working">
+              <span className="work-mark">
+                <IconMark />
+              </span>
+              <span className="work-stats">
+                {secs(elapsed)}
+                {tokens > 0 && ` · ${tokens.toLocaleString()} tokens`}
+                {" · "}
+                <span className="act-now">still thinking…</span>
+              </span>
+              <span className="working-toggle">{liveThink ? "show" : ""}</span>
+            </summary>
+            <pre className="act-think working-think">
+              {liveThink || "No reasoning streamed yet — some models only send their answer."}
+            </pre>
+          </details>
         )}
       </div>
+    </div>
+  );
+}
+
+/** The agent's plan, with progress. Green marks completion because that is the
+ *  one thing worth reading at a glance on a long run. */
+function TodoList({ todos }: { todos: TodoItem[] }) {
+  const done = todos.filter((t) => t.status === "done").length;
+  const pct = Math.round((done / todos.length) * 100);
+  const finished = done === todos.length;
+  return (
+    <div className={`todos ${finished ? "all-done" : ""}`}>
+      <div className="todos-head">
+        <span className="todos-title">Plan</span>
+        <span className="todos-count">
+          {done}/{todos.length}
+        </span>
+        <span className="todos-bar" aria-hidden>
+          <span style={{ width: `${pct}%` }} />
+        </span>
+      </div>
+      <ol className="todos-list">
+        {todos.map((t, i) => (
+          <li key={i} className={`todo ${t.status}`}>
+            <span className="todo-mark" aria-hidden />
+            <span className="todo-text">{t.text}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -135,14 +172,21 @@ function Message({ item, live }: { item: LogItem; live: boolean }) {
     );
   }
   if (item.kind === "think") {
+    // Collapsed to a single short row: the reasoning is working-out, not an
+    // answer. A preview of it used to sit here and ran off the right edge, so
+    // the text now appears only once the row is opened.
+    const lines = item.text.split("\n").filter((l) => l.trim());
     return (
       <details className="work-group think-group">
         <summary>
           {live && <span className="act-live" />}
           <span className={live ? "act-now" : ""}>Thinking</span>
+          <span className="think-count">
+            {lines.length} line{lines.length === 1 ? "" : "s"}
+          </span>
         </summary>
         <div className="work-items">
-          <span className="act-think">{item.text}</span>
+          <pre className="act-think">{item.text}</pre>
         </div>
       </details>
     );

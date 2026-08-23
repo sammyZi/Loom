@@ -60,9 +60,45 @@ pub struct ToolCtx {
     /// Present only for agents allowed to delegate. A subagent gets None, so a
     /// child cannot spawn children and recurse forever.
     pub spawn_subagent: Option<SubagentRunner>,
+    /// path -> hash of what was last handed to the model. Shared across the
+    /// whole run, including the planner/coder/reviewer roles, because each of
+    /// them starts with a fresh context and would otherwise re-read the same
+    /// files: one task re-read fifteen files three times over for ~30k tokens
+    /// of pure duplication.
+    pub reads: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    /// Paths written this task, so "done" can be told from "changed nothing".
+    pub writes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Bytes of file content handed over this task. Telling the model to read
+    /// selectively did not work — one run pulled thirteen whole files, 43 KB,
+    /// before attempting any edit — so past this budget whole-file reads are
+    /// refused and it has to search or ask for a range.
+    pub read_budget: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Roughly 15k tokens of source. Enough to read a handful of files whole, not
+/// enough to swallow a project.
+pub const READ_BUDGET_BYTES: usize = 60_000;
+
+fn content_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
 }
 
 impl ToolCtx {
+    /// Record that a file was actually written. Also drops it from the read
+    /// cache, so a later read returns the new contents rather than the
+    /// "unchanged" note.
+    pub fn note_write(&self, path: &str) {
+        if let Ok(mut w) = self.writes.lock() {
+            w.insert(path.to_string());
+        }
+        if let Ok(mut r) = self.reads.lock() {
+            r.remove(path);
+        }
+    }
+
     /// Decide one call, and for `ask` block until the user answers. Returns the
     /// refusal text to hand back to the model, or None to go ahead.
     ///
@@ -138,6 +174,7 @@ impl ToolRegistry {
                 Box::new(AskUser),
                 Box::new(Task),
                 Box::new(LoadSkill),
+                Box::new(OpenBrowser),
             ],
         }
     }
@@ -200,7 +237,13 @@ impl ToolRegistry {
     }
 
     pub fn schemas(&self) -> Vec<Value> {
-        self.schemas_for(None)
+        self.schemas_with(&[])
+    }
+
+    /// Convenience for callers that have a workspace rather than a skill list.
+    pub fn schemas_for(&self, ws: Option<&WorkspaceRoot>) -> Vec<Value> {
+        let skills = ws.map(crate::skills::discover).unwrap_or_default();
+        self.schemas_with(&skills)
     }
 
     /// Schemas, with the workspace's skills listed inside the `skill` tool's
@@ -210,12 +253,25 @@ impl ToolRegistry {
     ///
     /// With no skills installed the tool is dropped entirely, so an empty shelf
     /// costs nothing and the model is never tempted to call it.
-    pub fn schemas_for(&self, ws: Option<&WorkspaceRoot>) -> Vec<Value> {
-        let skills = ws.map(crate::skills::discover).unwrap_or_default();
-        let catalogue = crate::skills::catalogue(&skills);
+    pub fn schemas_with(&self, skills: &[crate::skills::Skill]) -> Vec<Value> {
+        self.schemas_with_loaded(skills, &[])
+    }
+
+    /// `loaded` names skills already pasted into the system prompt; they are
+    /// dropped from the catalogue so the model is not invited to fetch what it
+    /// already has.
+    pub fn schemas_with_loaded(
+        &self,
+        skills: &[crate::skills::Skill],
+        loaded: &[String],
+    ) -> Vec<Value> {
+        let catalogue = crate::skills::catalogue_excluding(skills, loaded);
         self.tools
             .iter()
-            .filter(|t| t.name() != "skill" || !skills.is_empty())
+            // Offered only when something is left to fetch. With every skill
+            // preloaded the catalogue is empty, and a tool advertising nothing
+            // is an invitation to waste a call.
+            .filter(|t| t.name() != "skill" || !catalogue.is_empty())
             .map(|t| {
                 let mut description = t.description().to_string();
                 if t.name() == "skill" {
@@ -245,6 +301,7 @@ struct TodoWrite;
 struct AskUser;
 struct Task;
 struct LoadSkill;
+struct OpenBrowser;
 
 /// Runs one subagent to completion and returns its final message. Boxed as a
 /// callback because the orchestrator owns the pipeline; the tools crate cannot
@@ -860,10 +917,46 @@ impl Tool for ReadFile {
         let raw = viewer::read_file(&ctx.ws, path)?;
         let offset = input["offset"].as_u64();
         let limit = input["limit"].as_u64();
-        if offset.is_none() && limit.is_none() {
-            return Ok(crate::context::clip_file(path, &raw));
+        if offset.is_some() || limit.is_some() {
+            // An explicit slice is always a fresh request; the model is asking
+            // for a specific window, not the file it already has.
+            return Ok(slice_lines(&raw, offset, limit));
         }
-        Ok(slice_lines(&raw, offset, limit))
+        let hash = content_hash(&raw);
+        let seen = {
+            let mut reads = ctx.reads.lock().unwrap();
+            reads.insert(path.to_string(), hash) == Some(hash)
+        };
+        tracing::info!(
+            "read_file {path}: {} ({} bytes)",
+            if seen { "CACHED" } else { "full" },
+            raw.len()
+        );
+        if seen {
+            return Ok(format!(
+                "{path} is unchanged since it was read earlier in this task ({} lines) — its \
+                 contents are already above. Do not read it again; use search_files to find a \
+                 detail, or read_file with offset/limit for one region.",
+                raw.lines().count()
+            ));
+        }
+        // Cached repeats are free; only new content spends the budget. Checked
+        // before adding, so the read that would *cross* the line is the one
+        // refused — charging first let one more whole file through.
+        use std::sync::atomic::Ordering::Relaxed;
+        let spent = ctx.read_budget.load(Relaxed);
+        if spent + raw.len() > READ_BUDGET_BYTES {
+            return Ok(format!(
+                "refused: this task has already read {} KB of source and {path} would take it \
+                 past the whole-file budget ({} lines). Use search_files to locate what you \
+                 need, then read_file with offset and limit for that region — or edit what you \
+                 have already read.",
+                spent / 1000,
+                raw.lines().count()
+            ));
+        }
+        ctx.read_budget.fetch_add(raw.len(), Relaxed);
+        Ok(crate::context::clip_file(path, &raw))
     }
 }
 
@@ -915,6 +1008,7 @@ impl Tool for WriteFile {
         let content = input["content"].as_str().unwrap_or("");
         let existed = viewer::read_file(&ctx.ws, path).is_ok();
         viewer::write_file(&ctx.ws, path, content)?;
+        ctx.note_write(path);
         Ok(format!(
             "{} {path} ({} lines)",
             if existed { "overwrote" } else { "created" },
@@ -1099,6 +1193,7 @@ impl Tool for EditFile {
             return Ok("no changes".into());
         }
         viewer::write_file(&ctx.ws, path, &after)?;
+        ctx.note_write(path);
         let diff = unified_diff(path, &before, &after);
         let _ = ctx.events.send(AgentEvent::Diff {
             path: path.to_string(),
@@ -1198,6 +1293,88 @@ impl Tool for RunCommand {
 /// The id every agent shell chunk streams under; the terminal panel maps it to
 /// its read-only Agent tab.
 pub const AGENT_STREAM_ID: &str = "agent";
+
+/// Loopback only. `web_fetch` refuses every private address to stop the agent
+/// being talked into probing the LAN, but the one thing it therefore could not
+/// do was check the dev server it had just started. This opens exactly that
+/// hole and no more: 127.0.0.0/8, ::1 and `localhost`, nothing else private.
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    h == "localhost" || h.ends_with(".localhost") || h == "::1" || h.starts_with("127.")
+}
+
+#[async_trait]
+impl Tool for OpenBrowser {
+    fn name(&self) -> &'static str {
+        "browser_open"
+    }
+    fn description(&self) -> &'static str {
+        "Open a URL in the app's Browser panel so the user can see it, and report back the \
+         status code and page title. Use it to check a dev server you started actually serves \
+         (http://localhost:PORT — read the real port from the server's own output) and to show \
+         the user the running result. Localhost and public http(s) URLs are both allowed."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "http:// or https:// URL" }
+            },
+            "required": ["url"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, cancel: &CancellationToken) -> Result<String> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        let raw = input["url"].as_str().unwrap_or("").trim().to_string();
+        let url = reqwest::Url::parse(&raw).with_context(|| format!("bad URL `{raw}`"))?;
+        let (host, _) = url_host_port(&url)?;
+        if !is_loopback_host(&host) {
+            // Anything not loopback goes through the same guard web_fetch uses.
+            assert_public_target(&url).await?;
+        }
+
+        // Show it first: even a failing page is worth putting in front of the
+        // user, and the panel is how they see what the agent built.
+        let _ = ctx.events.send(AgentEvent::Browse { url: url.to_string() });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()?;
+        let res = match client.get(url.clone()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(format!(
+                    "opened {url} in the Browser panel, but the request failed: {e}. If this is \
+                     a dev server, check it is still running and that the port matches the one \
+                     it printed."
+                ))
+            }
+        };
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        let title = page_title(&body).unwrap_or_else(|| "(no <title>)".into());
+        Ok(format!(
+            "{url} → {} {}\ntitle: {title}\nOpened in the Browser panel.",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or(""),
+        ))
+    }
+}
+
+/// First `<title>` in the document, whitespace-collapsed.
+pub fn page_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find("<title")?;
+    let gt = lower[open..].find('>')? + open + 1;
+    let close = lower[gt..].find("</title>")? + gt;
+    let raw = html[gt..close].trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(raw.split_whitespace().collect::<Vec<_>>().join(" "))
+}
 
 #[async_trait]
 impl Tool for LoadSkill {
@@ -1719,30 +1896,23 @@ mod tool_tests {
     /// injected, skills become invisible and the feature silently does nothing.
     #[test]
     fn skill_schema_carries_the_catalogue_and_vanishes_when_empty() {
-        let root = std::env::temp_dir().join("ide-ai-skill-schema-test");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let ws = WorkspaceRoot::open(&root).unwrap();
         let reg = ToolRegistry::full();
 
         // Empty shelf: the tool is not offered at all.
         let names: Vec<String> = reg
-            .schemas_for(Some(&ws))
+            .schemas_with(&[])
             .iter()
             .map(|s| s["name"].as_str().unwrap_or("").to_string())
             .collect();
         assert!(!names.contains(&"skill".to_string()), "{names:?}");
 
-        // Install one, and it appears with its description inline.
-        let dir = root.join(".opencode/skills/code-review");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("SKILL.md"),
-            "---\nname: code-review\ndescription: House review checklist\n---\nSteps here.\n",
-        )
-        .unwrap();
-
-        let schemas = reg.schemas_for(Some(&ws));
+        // With one installed it appears, description inline.
+        let installed = [crate::skills::Skill {
+            name: "code-review".into(),
+            description: "House review checklist".into(),
+            path: std::path::PathBuf::from("SKILL.md"),
+        }];
+        let schemas = reg.schemas_with(&installed);
         let skill = schemas
             .iter()
             .find(|s| s["name"] == "skill")
@@ -1750,6 +1920,129 @@ mod tool_tests {
         let desc = skill["description"].as_str().unwrap();
         assert!(desc.contains("code-review"), "{desc}");
         assert!(desc.contains("House review checklist"), "{desc}");
+    }
+
+    /// Build a context against a real temp workspace so the file tools can be
+    /// exercised end to end.
+    fn test_ctx(root: &std::path::Path) -> ToolCtx {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let (shell_tx, _) = tokio::sync::broadcast::channel(64);
+        ToolCtx {
+            ws: WorkspaceRoot::open(root).unwrap(),
+            sandbox: sandbox::native(),
+            events,
+            shell_tx,
+            shells: ShellRegistry::new(),
+            perm: None,
+            perms: PermissionSet::allow_all(),
+            spawn_subagent: None,
+            reads: Default::default(),
+            writes: Default::default(),
+            read_budget: Default::default(),
+        }
+    }
+
+    /// The reported waste: a run pulled thirteen whole files (43 KB) before
+    /// attempting a single edit. Telling the model to read selectively did not
+    /// work, so the budget refuses further whole-file reads once spent.
+    #[tokio::test]
+    async fn whole_file_reads_stop_at_the_budget() {
+        let root = std::env::temp_dir().join("ide-ai-read-budget-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let big = "x".repeat(25_000);
+        for n in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(root.join(n), &big).unwrap();
+        }
+        let ctx = test_ctx(&root);
+        let cancel = CancellationToken::new();
+        let read = |name: &str| {
+            let v = json!({ "path": name });
+            async { ReadFile.call(&ctx, v, &cancel).await.unwrap() }
+        };
+
+        // Under budget: real content.
+        assert!(read("a.txt").await.contains("xxx"));
+        assert!(read("b.txt").await.contains("xxx"));
+        // 50 KB spent; the next whole-file read crosses 60 KB and is refused.
+        let refused = read("c.txt").await;
+        assert!(refused.starts_with("refused:"), "{}", &refused[..80.min(refused.len())]);
+        assert!(refused.contains("budget"), "{refused}");
+        assert!(refused.contains("search_files"), "must say what to do instead: {refused}");
+
+        // A range read still works — the budget bounds bulk reading, not access.
+        let sliced = ReadFile
+            .call(&ctx, json!({ "path": "d.txt", "offset": 1, "limit": 1 }), &cancel)
+            .await
+            .unwrap();
+        assert!(sliced.contains("xxx"), "ranges stay available: {sliced}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The reported waste: the same fifteen files read three times over for
+    /// ~30k tokens. A second read of unchanged content must return a pointer,
+    /// not the file — and an edit must bring the real contents back.
+    #[tokio::test]
+    async fn a_file_is_only_sent_once_until_it_changes() {
+        let root = std::env::temp_dir().join("ide-ai-read-cache-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "hello\nworld\n").unwrap();
+        let ctx = test_ctx(&root);
+        let cancel = CancellationToken::new();
+        let arg = json!({ "path": "a.txt" });
+
+        let first = ReadFile.call(&ctx, arg.clone(), &cancel).await.unwrap();
+        assert!(first.contains("hello"), "first read returns the file: {first}");
+
+        let second = ReadFile.call(&ctx, arg.clone(), &cancel).await.unwrap();
+        assert!(!second.contains("hello"), "second read must not resend it: {second}");
+        assert!(second.contains("unchanged"), "{second}");
+        assert!(second.contains("2 lines"), "{second}");
+
+        // Changing the file on disk makes it fresh again.
+        std::fs::write(root.join("a.txt"), "hello\nthere\n").unwrap();
+        let third = ReadFile.call(&ctx, arg.clone(), &cancel).await.unwrap();
+        assert!(third.contains("there"), "changed content must be resent: {third}");
+
+        // An explicit slice is always honoured — the model is asking for a
+        // specific window, not the copy it already has.
+        let sliced = ReadFile
+            .call(&ctx, json!({ "path": "a.txt", "offset": 1, "limit": 1 }), &cancel)
+            .await
+            .unwrap();
+        assert!(sliced.contains("hello"), "{sliced}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Writing must both record the write and invalidate the read cache, or the
+    /// next read would claim the file is unchanged when the agent just edited it.
+    #[tokio::test]
+    async fn writing_records_the_change_and_refreshes_the_cache() {
+        let root = std::env::temp_dir().join("ide-ai-write-cache-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("b.txt"), "one\n").unwrap();
+        let ctx = test_ctx(&root);
+        let cancel = CancellationToken::new();
+        let arg = json!({ "path": "b.txt" });
+
+        ReadFile.call(&ctx, arg.clone(), &cancel).await.unwrap();
+        assert!(ctx.writes.lock().unwrap().is_empty(), "reading is not writing");
+
+        WriteFile
+            .call(&ctx, json!({ "path": "b.txt", "content": "two\n" }), &cancel)
+            .await
+            .unwrap();
+        assert!(
+            ctx.writes.lock().unwrap().contains("b.txt"),
+            "a write must be recorded so 'done with no changes' can be caught"
+        );
+
+        let after = ReadFile.call(&ctx, arg, &cancel).await.unwrap();
+        assert!(after.contains("two"), "post-write read must return new content: {after}");
 
         std::fs::remove_dir_all(&root).ok();
     }

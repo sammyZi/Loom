@@ -1,8 +1,15 @@
 "use client";
 
-import { IconCheck, IconDiff, IconLink, IconPanel, IconTerminal } from "@/components/Icons";
+import {
+  IconCheck,
+  IconDiff,
+  IconGlobe,
+  IconLink,
+  IconPanel,
+  IconTerminal,
+} from "@/components/Icons";
 
-export type Panel = "none" | "terminal" | "diff";
+export type Panel = "none" | "terminal" | "diff" | "browser";
 
 export function TopBar({
   title,
@@ -51,6 +58,13 @@ export function TopBar({
         onClick={() => onPanel(panel === "diff" ? "none" : "diff")}
       >
         <IconDiff />
+      </button>
+      <button
+        className={`icon-btn ${panel === "browser" ? "on" : ""}`}
+        title={panel === "browser" ? "Hide browser" : "Show browser"}
+        onClick={() => onPanel(panel === "browser" ? "none" : "browser")}
+      >
+        <IconGlobe />
       </button>
       <button
         className={`icon-btn ${panel === "terminal" ? "on" : ""}`}

@@ -22,6 +22,14 @@ pub struct RunEnv {
     pub shells: ShellRegistry,
     pub cancel: CancellationToken,
     pub settings: Settings,
+    /// Files already handed to the model this task. Shared by every role so the
+    /// coder does not re-read what the planner just read.
+    pub reads: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    /// Paths this task actually wrote. Lets the pipeline tell "done" apart from
+    /// "talked about it and changed nothing".
+    pub writes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Bytes of whole-file content served this task; bounds runaway reading.
+    pub read_budget: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -41,7 +49,13 @@ pub async fn run_agent(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
-    let schemas = tools.schemas_for(Some(&env.ws));
+    // Skills ride in the system prompt rather than waiting to be fetched: the
+    // `skill` tool alone meant they only applied when the model remembered to
+    // ask. The system prompt is also the cached prefix, so this is billed in
+    // full once and at roughly a tenth on every turn after.
+    let (skill_text, preloaded) = crate::skills::preload(&env.ws);
+    let all_skills = crate::skills::discover(&env.ws);
+    let schemas = tools.schemas_with_loaded(&all_skills, &preloaded);
     let ctx = ToolCtx {
         ws: env.ws.clone(),
         sandbox: env.sandbox.clone(),
@@ -51,10 +65,13 @@ pub async fn run_agent(
         perm,
         perms,
         spawn_subagent,
+        reads: env.reads.clone(),
+        writes: env.writes.clone(),
+        read_budget: env.read_budget.clone(),
     };
     let mut messages = seed;
     messages.push(Message::user_text(prompt));
-    let system = system_prompt(role, &ctx.ws);
+    let system = format!("{}{skill_text}", system_prompt(role, &ctx.ws));
     let mut last_text = String::new();
     // The most accurate conversation size seen so far: the provider's own
     // input-token report beats any local character estimate. Shared because
@@ -102,9 +119,21 @@ pub async fn run_agent(
                         let _ = ev_tx.send(AgentEvent::Usage { tokens: o });
                     }
                 }
-                StreamKind::ThinkDelta(_) => {}
+                // Reasoning was being dropped on the floor, so the "thinking"
+                // block in the feed never had anything to show.
+                StreamKind::ThinkDelta(t) => {
+                    let _ = ev_tx.send(AgentEvent::Think { text: t });
+                }
                 StreamKind::TextDelta(t) => {
-                    let _ = ev_tx.send(AgentEvent::Token { text: t });
+                    // Only the role that closes the run speaks to the user. A
+                    // planner or reviewer streaming as answer text is why an
+                    // internal plan ("Implementation plan: 1. Scaffold…") was
+                    // being narrated at the user as if it were the reply.
+                    let _ = ev_tx.send(if announce_done {
+                        AgentEvent::Token { text: t }
+                    } else {
+                        AgentEvent::Think { text: t }
+                    });
                 }
                 StreamKind::ToolUse { name, input } => {
                     let _ = ev_tx.send(AgentEvent::ToolCall { name, input });
@@ -208,6 +237,17 @@ the terminal panel. Do not start the same background job twice. A dev server pri
 port it actually bound to — read it from that output and use it. Never assume the default port: \
 it moves when the port is busy (Next falls back to 3001), so checking the wrong one reports a \
 server that is not yours. \
+Reading costs more than anything else you do, so read like someone paying for it. \
+Find the place first with search_files, then read_file with offset and limit around it. \
+Read a whole file only when you are about to rewrite it whole. Never open every file in a \
+folder to 'get oriented' — decide from the file list and one search which two or three \
+actually matter. Read each file once: its contents stay in this conversation, and asking \
+again returns a one-line note, not the file. \
+Never restate a file's contents, a diff, or a code block in your reasoning. The code is \
+already in the conversation; repeating it there is pure waste and it is not shown to the user. \
+Think in short notes to yourself, not in code. \
+If a skill covers the work you are about to do, load it first and follow it — when a \
+`ponytail` skill is listed, load it before writing any code and apply it. \
 Answer questions about this machine by running the command, never by refusing: the date and \
 time, tool versions, disk contents and git state are all one run_command away. \
 Do the task the user actually asked for and stop. 'Start the app' means start it — not install, \
@@ -229,7 +269,8 @@ carries out the plan, so 'I can't run commands' is wrong and confusing. Plan the
 do not hand it back for the user to type."
         ),
         AgentRole::Coder => format!(
-            "{common}\nYou are the coder. Carry out the plan. Only *code changes* get \
+            "{common}\nYou are the coder. Write the change — a turn that reads and plans but \
+edits nothing has failed, however good the explanation. Carry out the plan. Only *code changes* get \
 check_code and run_tests afterwards — a task that runs or inspects something is finished when \
 it has run, and following it with a build or test suite wastes the user's time. \
 Reply with the result: for a change, the files touched; for a command, what it did and the \

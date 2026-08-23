@@ -1130,6 +1130,8 @@ body.dragging-col {
 /* Divider between the read-only agent section and the user's own terminals. */
 .term-sep { width: 1px; height: 18px; flex-shrink: 0; margin: 0 5px; background: var(--border-2); }
 .panel-empty { padding: 16px; color: var(--faint); font-size: 12.5px; }
+.no-repo { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.no-repo p { margin: 0; max-width: 34ch; line-height: 1.6; }
 .diff {
   flex: 1;
   min-height: 0;
@@ -1381,24 +1383,175 @@ body.dragging-col {
 }
 .term-body:focus, .term-body:focus-visible { outline: none; }
 
+/* ---------- live status line, expandable into the reasoning ---------- */
+.working-wrap { margin: 0 0 16px; }
+.working-wrap > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  transition: background 0.14s;
+}
+.working-wrap > summary::-webkit-details-marker { display: none; }
+.working-wrap > summary:hover { background: var(--hover); }
+.working-wrap > summary .working { margin: 0; }
+.working-toggle {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--faint);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.working-wrap[open] .working-toggle::after { content: " less"; }
+.working-wrap[open] .working-toggle { font-size: 0; }
+.working-wrap[open] .working-toggle::after { font-size: 11px; }
+.working-think {
+  margin: 8px 0 0 24px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--border-2);
+  background: var(--bg-2);
+  border-radius: 0 8px 8px 0;
+  max-height: 300px;
+}
+
+/* ---------- browser panel ---------- */
+.browser .panel-head { gap: 4px; padding: 0 6px; }
+.browser-fwd svg { transform: rotate(180deg); }
+.browser .icon-btn:disabled { opacity: 0.35; cursor: default; }
+.browser .icon-btn:disabled:hover { background: none; color: var(--muted); }
+.browser-url {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 12px;
+  font-family: var(--font-mono), ui-monospace, Consolas, monospace;
+  outline: none;
+  transition: border-color 0.14s;
+}
+.browser-url:focus { border-color: var(--accent); color: var(--text); }
+.browser-body { position: relative; flex: 1; min-height: 0; background: #fff; }
+.browser-body iframe { width: 100%; height: 100%; border: 0; display: block; }
+/* The panel is dark; an empty state on a white page needs its own ground. */
+.browser-body .panel-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  background: var(--bg);
+  text-align: center;
+  padding: 0 24px;
+}
+/* Thin top progress line while a page loads — the iframe gives us onLoad and
+   nothing else, so this is the only honest signal available. */
+.browser-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 1;
+  background: linear-gradient(90deg, transparent, var(--accent-hi), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: browser-scan 1.1s linear infinite;
+}
+@keyframes browser-scan {
+  from { background-position: -40% 0; }
+  to { background-position: 140% 0; }
+}
+
 /* ---------- agent task list ---------- */
 .todos {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: 10px 0 14px;
-  padding: 10px 12px;
+  margin: 12px 0 16px;
+  padding: 11px 13px 12px;
   border: 1px solid var(--border);
+  border-left: 2px solid var(--ok);
   border-radius: 10px;
   background: var(--bg-2);
+  transition: border-color 0.2s var(--ease);
 }
-.todo { display: flex; align-items: baseline; gap: 9px; font-size: 13px; color: var(--text-2); }
-.todo-mark { width: 13px; flex-shrink: 0; text-align: center; color: var(--faint); font-size: 11px; }
+/* Everything finished: the whole card goes green rather than making the reader
+   count the ticks. */
+.todos.all-done { border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.todos.all-done .todos-title { color: var(--ok); }
+
+.todos-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+.todos-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.todos-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.todos-bar {
+  flex: 1;
+  height: 3px;
+  min-width: 40px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.todos-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--ok);
+  transition: width 0.35s var(--ease);
+}
+
+.todos-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.todo { display: flex; align-items: baseline; gap: 10px; font-size: 13px; color: var(--text-2); }
+
+/* Drawn rather than a glyph, so every row's text starts on the same column. */
+.todo-mark {
+  position: relative;
+  top: 1px;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-2);
+  transition: background 0.2s, border-color 0.2s;
+}
+.todo-text { flex: 1; min-width: 0; }
+
 .todo.done { color: var(--muted); }
 .todo.done .todo-text { text-decoration: line-through; text-decoration-color: var(--border-2); }
-.todo.done .todo-mark { color: var(--ok); }
-.todo.running { color: var(--text); }
-.todo.running .todo-mark { color: var(--accent-hi); }
+.todo.done .todo-mark {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+/* The tick, drawn on the filled dot. */
+.todo.done .todo-mark::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0.5px;
+  width: 3px;
+  height: 6px;
+  border: solid var(--bg-2);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.todo.running { color: var(--text); font-weight: 500; }
+.todo.running .todo-mark {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  animation: breathe 1.6s var(--ease) infinite;
+}
+.todo.pending { color: var(--muted); }
 
 /* ---------- activity rows (thinking / read / edit / run) ---------- */
 .act { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--muted); }
@@ -1413,13 +1566,25 @@ body.dragging-col {
   overflow-wrap: anywhere;
 }
 .act-think {
+  margin: 0;
+  font-family: inherit;
   font-size: 13px;
   font-style: italic;
   color: var(--muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.6;
+  /* Reasoning runs long; bound it and scroll rather than pushing the answer
+     off screen. */
+  max-height: 340px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #4d4d46 transparent;
 }
+.think-count { flex: none; color: var(--faint); font-size: 11px; }
+/* Nothing in this row may stretch it: the summary is a fixed short line, and
+   the reasoning lives inside the disclosure. */
+.think-group > summary { max-width: 100%; overflow: hidden; }
 .act-live {
   width: 6px;
   height: 6px;
@@ -1642,6 +1807,31 @@ body.dragging-col {
   margin-top: 2px;
   scrollbar-width: thin;
   scrollbar-color: #4d4d46 transparent;
+}
+.skill-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 10px;
+  border-radius: 6px;
+}
+.skill-row:hover { background: var(--hover); }
+.skill-name {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-2);
+  font-family: var(--font-mono), ui-monospace, Consolas, monospace;
+}
+/* Two lines then clip: a skill description is a paragraph, and the sidebar is
+   an index of what exists, not the place to read it. */
+.skill-desc {
+  font-size: 11.5px;
+  color: var(--faint);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .side-foot-row { display: flex; align-items: stretch; gap: 6px; }
 .side-foot-row .clear-all { flex: 1; min-width: 0; }

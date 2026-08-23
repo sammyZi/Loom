@@ -3,6 +3,7 @@
 import {
   Archive,
   ArrowLeft,
+  BookOpen,
   Check,
   ChevronRight,
   Copy,
@@ -10,6 +11,7 @@ import {
   Folder,
   GitBranch,
   GitFork,
+  Globe,
   Link2,
   Maximize2,
   MoreHorizontal,
@@ -60,6 +62,8 @@ export const IconSearch = (p: LucideProps) => <Search {...p} />;
 export const IconArchive = (p: LucideProps) => <Archive {...p} />;
 export const IconUndo = (p: LucideProps) => <Undo2 {...p} />;
 export const IconGear = (p: LucideProps) => <Settings {...p} />;
+export const IconGlobe = (p: LucideProps) => <Globe {...p} />;
+export const IconBook = (p: LucideProps) => <BookOpen {...p} />;
 export const IconSpeak = (p: LucideProps) => <Volume2 {...p} />;
 export const IconSpeakOff = (p: LucideProps) => <VolumeX {...p} />;
 

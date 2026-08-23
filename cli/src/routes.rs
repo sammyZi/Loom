@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/agent/permission", post(agent_permission))
         .route("/agent/models", get(agent_models))
         .route("/agent/agents", get(agent_list))
+        .route("/agent/skills", get(skills_list))
         .route("/settings/providers", get(providers_get).post(providers_post))
         .route("/shell/run", post(shell_run))
         .route("/shell/cancel", post(shell_cancel))
@@ -258,6 +259,25 @@ fn trim_history(history: &mut Vec<agent::Message>) {
     }
 }
 
+/// Skills visible from the open workspace. Empty until a folder is open, since
+/// project skills live inside it.
+async fn skills_list(State(st): State<AppState>) -> impl IntoResponse {
+    let found = match st.workspace.read().await.as_ref() {
+        Some(ws) => agent::skills::discover(ws),
+        None => Vec::new(),
+    };
+    Json(serde_json::json!({
+        "skills": found
+            .iter()
+            .map(|s| serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "path": s.path.to_string_lossy(),
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
 /// The agent catalog: primaries for the composer picker, subagents for `@`.
 async fn agent_list() -> impl IntoResponse {
     Json(agent::agents::agents_json())
@@ -405,6 +425,11 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         shells: st.shells.clone(),
         cancel: cancel.clone(),
         settings,
+        // Fresh per task: what was read for the last question should not
+        // suppress a re-read for this one.
+        reads: Default::default(),
+        writes: Default::default(),
+        read_budget: Default::default(),
     };
     let prompt = body.prompt;
     tokio::spawn(async move {
@@ -522,6 +547,7 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
     if cmd.is_empty() {
         return err(StatusCode::BAD_REQUEST, "cmd required");
     }
+    let ws_root = ws.root().to_string_lossy().into_owned();
     let named = !body.id.is_empty();
 
     // Unnamed callers get no stream, since nothing could tell their chunks
@@ -561,6 +587,14 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
             }
         });
         sink = Some(tx);
+        // The echo is written here, not by the client, so the directory shown
+        // is by construction the one the command runs in. When the client kept
+        // its own copy the two could drift — the prompt read `D:\projects\test`
+        // while `dir` listed the previous workspace.
+        let _ = st.shell_tx.send(ide_core::ShellEvent::Chunk {
+            id: body.id.clone(),
+            text: format!("{}> {cmd}\n", ws.root().display()),
+        });
     }
 
     let program: &str = if cfg!(windows) { "cmd" } else { "sh" };
@@ -569,7 +603,12 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
     } else {
         vec!["-lc".into(), cmd.clone()]
     };
-    let timeout = if body.background { BG_TIMEOUT } else { std::time::Duration::from_secs(60) };
+    // No short deadline for a terminal. A person is watching this one and can
+    // stop it with Ctrl+C or by closing the tab, so a 60s cap bought nothing
+    // and killed exactly the commands terminals exist for — `npm run dev` died
+    // mid-session with "[sandbox] timed out". The agent's own calls keep their
+    // 120s cap, which is set separately in agent/src/tools.rs.
+    let timeout = BG_TIMEOUT;
 
     if body.background && named {
         // Fire and forget: respond immediately; output streams over /ws/shell
@@ -612,6 +651,9 @@ async fn shell_run(State(st): State<AppState>, Json(body): Json<ShellBody>) -> i
             "exit_code": out.exit_code,
             "stdout": out.stdout,
             "stderr": out.stderr,
+            // So the client can notice its idea of the workspace has gone
+            // stale — e.g. another window opened a different folder.
+            "cwd": ws_root,
         }))
         .into_response(),
         Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e.to_string()),

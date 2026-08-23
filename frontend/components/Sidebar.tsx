@@ -2,6 +2,7 @@
 
 import {
   IconArchive,
+  IconBook,
   IconChevron,
   IconClose,
   IconFolder,
@@ -14,11 +15,11 @@ import {
   IconTrash,
   IconUndo,
 } from "@/components/Icons";
-import type { SessionLite } from "@/lib/api";
+import { api, type SessionLite, type SkillInfo } from "@/lib/api";
 import type { Recent } from "@/components/Welcome";
 import { baseName } from "@/lib/log";
 import { whenText, type Session } from "@/lib/store";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export type Group = { path: string; name: string; sessions: Session[] };
 
@@ -77,6 +78,16 @@ export function Sidebar({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+
+  // Re-read when the folder changes: project skills live inside the workspace.
+  useEffect(() => {
+    api
+      .skills()
+      .then((r) => setSkills(r.skills))
+      .catch(() => setSkills([]));
+  }, [folder]);
   const [query, setQuery] = useState("");
 
   const flip = (path: string) => setShut((p) => ({ ...p, [path]: !p[path] }));
@@ -141,6 +152,40 @@ export function Sidebar({
           <IconFolder />
           Open folder
         </button>
+      </div>
+
+      {/* What the agent can load for a task. Read-only: skills are files on
+          disk, so this shows what is installed and where. */}
+      <div className="proj proj-archived">
+        <div className="proj-head">
+          <button
+            className="proj-name arch-toggle"
+            onClick={() => setSkillsOpen((v) => !v)}
+            aria-expanded={skillsOpen}
+            title="Skills the agent can load"
+          >
+            <IconChevron className={`proj-chev ${skillsOpen ? "" : "down"}`} />
+            <IconBook className="arch-ico" />
+            Skills
+            {skills.length > 0 && <span className="arch-count">{skills.length}</span>}
+          </button>
+        </div>
+        {skillsOpen && (
+          <div className="proj-body arch-body">
+            {skills.length === 0 && (
+              <div className="sess-empty">
+                None installed. Drop a folder with a SKILL.md into
+                <code> .opencode/skills/</code>.
+              </div>
+            )}
+            {skills.map((s) => (
+              <div className="skill-row" key={s.name} title={s.path}>
+                <span className="skill-name">{s.name}</span>
+                <span className="skill-desc">{s.description}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Above the search box: archived chats are a fixed drawer, not another
