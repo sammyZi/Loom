@@ -41,7 +41,7 @@ pub async fn run_agent(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
-    let schemas = tools.schemas();
+    let schemas = tools.schemas_for(Some(&env.ws));
     let ctx = ToolCtx {
         ws: env.ws.clone(),
         sandbox: env.sandbox.clone(),

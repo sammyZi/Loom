@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod project;
+pub mod skills;
 pub mod provider;
 pub mod settings;
 mod compact;

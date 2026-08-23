@@ -137,6 +137,7 @@ impl ToolRegistry {
                 Box::new(TodoWrite),
                 Box::new(AskUser),
                 Box::new(Task),
+                Box::new(LoadSkill),
             ],
         }
     }
@@ -199,12 +200,30 @@ impl ToolRegistry {
     }
 
     pub fn schemas(&self) -> Vec<Value> {
+        self.schemas_for(None)
+    }
+
+    /// Schemas, with the workspace's skills listed inside the `skill` tool's
+    /// description. That listing is the *only* thing the model sees about a
+    /// skill until it asks for one — which is what keeps a shelf of playbooks
+    /// costing a line each instead of a document each.
+    ///
+    /// With no skills installed the tool is dropped entirely, so an empty shelf
+    /// costs nothing and the model is never tempted to call it.
+    pub fn schemas_for(&self, ws: Option<&WorkspaceRoot>) -> Vec<Value> {
+        let skills = ws.map(crate::skills::discover).unwrap_or_default();
+        let catalogue = crate::skills::catalogue(&skills);
         self.tools
             .iter()
+            .filter(|t| t.name() != "skill" || !skills.is_empty())
             .map(|t| {
+                let mut description = t.description().to_string();
+                if t.name() == "skill" {
+                    description.push_str(&catalogue);
+                }
                 json!({
                     "name": t.name(),
-                    "description": t.description(),
+                    "description": description,
                     "input_schema": t.input_schema(),
                 })
             })
@@ -225,6 +244,7 @@ struct WriteFile;
 struct TodoWrite;
 struct AskUser;
 struct Task;
+struct LoadSkill;
 
 /// Runs one subagent to completion and returns its final message. Boxed as a
 /// callback because the orchestrator owns the pipeline; the tools crate cannot
@@ -1180,6 +1200,42 @@ impl Tool for RunCommand {
 pub const AGENT_STREAM_ID: &str = "agent";
 
 #[async_trait]
+impl Tool for LoadSkill {
+    fn name(&self) -> &'static str {
+        "skill"
+    }
+    fn description(&self) -> &'static str {
+        // The catalogue cannot go here — descriptions are &'static and skills
+        // are per-workspace — so `describe_for` appends it at schema time.
+        "Load a skill: a written playbook for a particular kind of work, kept out of your \
+         context until you ask for it. Call it before starting a task one of them covers, and \
+         follow what it says in place of your default approach."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Skill name, exactly as listed" }
+            },
+            "required": ["name"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, _cancel: &CancellationToken) -> Result<String> {
+        let want = input["name"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+        let found = crate::skills::discover(&ctx.ws);
+        let Some(skill) = found.iter().find(|s| s.name == want) else {
+            let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+            return Ok(if names.is_empty() {
+                "no skills are installed in this workspace".into()
+            } else {
+                format!("no skill named `{want}`. Available: {}", names.join(", "))
+            });
+        };
+        crate::skills::load_body(skill)
+    }
+}
+
+#[async_trait]
 impl Tool for Task {
     fn name(&self) -> &'static str {
         "task"
@@ -1648,8 +1704,54 @@ mod tool_tests {
         assert!(!names.contains(&"run_command"), "{names:?}");
         assert!(!names.contains(&"edit_file"), "{names:?}");
         assert!(names.contains(&"read_file"), "{names:?}");
-        // and the schema list agrees with iter()
-        assert_eq!(reg.schemas().len(), names.len());
+        // The schema list matches iter(), except `skill` which is only offered
+        // when the workspace actually has skills installed.
+        let schema_names: Vec<String> = reg
+            .schemas()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or("").to_string())
+            .collect();
+        let expected: Vec<&str> = names.iter().copied().filter(|n| *n != "skill").collect();
+        assert_eq!(schema_names, expected);
+    }
+
+    /// The catalogue is how the model learns a skill exists. If it stops being
+    /// injected, skills become invisible and the feature silently does nothing.
+    #[test]
+    fn skill_schema_carries_the_catalogue_and_vanishes_when_empty() {
+        let root = std::env::temp_dir().join("ide-ai-skill-schema-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ws = WorkspaceRoot::open(&root).unwrap();
+        let reg = ToolRegistry::full();
+
+        // Empty shelf: the tool is not offered at all.
+        let names: Vec<String> = reg
+            .schemas_for(Some(&ws))
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(!names.contains(&"skill".to_string()), "{names:?}");
+
+        // Install one, and it appears with its description inline.
+        let dir = root.join(".opencode/skills/code-review");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: code-review\ndescription: House review checklist\n---\nSteps here.\n",
+        )
+        .unwrap();
+
+        let schemas = reg.schemas_for(Some(&ws));
+        let skill = schemas
+            .iter()
+            .find(|s| s["name"] == "skill")
+            .expect("skill tool should be offered once a skill exists");
+        let desc = skill["description"].as_str().unwrap();
+        assert!(desc.contains("code-review"), "{desc}");
+        assert!(desc.contains("House review checklist"), "{desc}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
