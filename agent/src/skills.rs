@@ -195,7 +195,13 @@ const PRELOAD_BUDGET: usize = 16_000;
 /// to ask for it, which it often did not. Loading them at the start of the run
 /// makes them unconditional. Anything past the budget stays behind the tool.
 pub fn preload(ws: &WorkspaceRoot) -> (String, Vec<String>) {
-    let found = discover(ws);
+    preload_in(ws, home_dir().as_deref())
+}
+
+/// Split out for the same reason as `discover_in`: a test must not depend on
+/// what happens to be installed in the developer's home directory.
+pub fn preload_in(ws: &WorkspaceRoot, home: Option<&Path>) -> (String, Vec<String>) {
+    let found = discover_in(ws, home);
     let mut text = String::new();
     let mut names = Vec::new();
     let mut spent = 0usize;
@@ -342,7 +348,7 @@ mod tests {
         .unwrap();
 
         let ws = WorkspaceRoot::open(&root).unwrap();
-        let (text, names) = preload(&ws);
+        let (text, names) = preload_in(&ws, None);
         assert_eq!(names, vec!["ponytail".to_string()]);
         assert!(text.contains("Prefer stdlib."), "body must be inlined: {text}");
         assert!(text.contains("--- skill: ponytail ---"), "{text}");
@@ -374,7 +380,7 @@ mod tests {
             .unwrap();
         }
         let ws = WorkspaceRoot::open(&root).unwrap();
-        let (text, names) = preload(&ws);
+        let (text, names) = preload_in(&ws, None);
         assert_eq!(names.len(), 1, "9 KB each, 16 KB budget: only one fits");
         assert!(text.len() < PRELOAD_BUDGET + 500, "budget respected");
         // The ones that did not fit are still reachable through the tool.
