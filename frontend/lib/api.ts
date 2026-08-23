@@ -80,6 +80,9 @@ export const api = {
       ok: boolean;
     }>,
   /** Provider catalog grouped for the model picker + settings modal. */
+  /** Agent catalog: primaries for the composer picker, subagents for `@`. */
+  agents: () =>
+    req("/agent/agents") as Promise<{ agents: AgentInfo[]; default: string }>,
   models: () =>
     req("/agent/models") as Promise<ModelCatalog>,
   providerSettings: () =>
@@ -225,6 +228,17 @@ export type AgentEvent =
   | { type: "ask"; id: string; program: string; args: string }
   /** Approximate context-window usage for the session (chars vs budget). */
   | { type: "context"; used: number; limit: number }
+  /** The agent's task list for a multi-step job; resent whole on each change. */
+  | { type: "todos"; items: TodoItem[] }
   | { type: "usage"; tokens: number }
   | { type: "done"; summary: string }
   | { type: "error"; message: string };
+
+export type TodoItem = { text: string; status: "pending" | "running" | "done" };
+
+export type AgentInfo = {
+  id: string;
+  label: string;
+  description: string;
+  mode: "primary" | "subagent" | "all";
+};

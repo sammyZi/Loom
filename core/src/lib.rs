@@ -1,3 +1,6 @@
+pub mod permission;
+pub use permission::{glob_match, Permission, PermissionEntry, PermissionSet};
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -118,6 +121,7 @@ pub enum FsEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ShellEvent {
     Chunk { id: String, text: String },
+    /// Placeholder kept next to the shell events; see AgentEvent::Todos.
     /// A background job the client did not start — the agent's dev servers and
     /// watchers. The terminal panel opens a tab for it so a long-running server
     /// gets its own scrollback instead of interleaving into one shared Agent
@@ -260,10 +264,20 @@ pub enum AgentEvent {
     /// Approximate model context usage for the session: characters of history
     /// about to be sent, against the compaction budget. Drives the UI meter.
     Context { used: u64, limit: u64 },
+    /// The agent's task list for a multi-step job, resent whole on every
+    /// change so the UI never has to reconcile a partial update.
+    Todos { items: Vec<TodoItem> },
     /// Completion tokens reported by the provider for one model call.
     Usage { tokens: u64 },
     Done { summary: String },
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    /// "pending" | "running" | "done".
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

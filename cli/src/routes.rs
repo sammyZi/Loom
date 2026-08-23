@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
         .route("/agent/cancel", post(agent_cancel))
         .route("/agent/permission", post(agent_permission))
         .route("/agent/models", get(agent_models))
+        .route("/agent/agents", get(agent_list))
         .route("/settings/providers", get(providers_get).post(providers_post))
         .route("/shell/run", post(shell_run))
         .route("/shell/cancel", post(shell_cancel))
@@ -255,6 +256,11 @@ fn trim_history(history: &mut Vec<agent::Message>) {
         let dropped = history.remove(0).preview().len();
         size = size.saturating_sub(dropped);
     }
+}
+
+/// The agent catalog: primaries for the composer picker, subagents for `@`.
+async fn agent_list() -> impl IntoResponse {
+    Json(agent::agents::agents_json())
 }
 
 /// Live where possible: a configured gateway is asked what it actually serves,

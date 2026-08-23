@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod project;
 pub mod provider;
 pub mod settings;
@@ -12,4 +13,4 @@ pub use provider::{
     normalize_model, provider_def, Message, DEFAULT_MODEL,
 };
 pub use settings::Settings;
-pub use tools::{PermGate, ToolCtx, ToolRegistry};
+pub use tools::{PermGate, SubagentRunner, ToolCtx, ToolRegistry};

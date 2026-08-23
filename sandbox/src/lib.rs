@@ -190,7 +190,7 @@ mod tests {
         let c = cancel.clone();
         let run = tokio::spawn(async move {
             sandbox
-                .run_streaming(&ws, "powershell", &slow_command(), Duration::from_secs(60), &c, Some(tx))
+                .run_streaming(&ws, "powershell", &slow_command(), Duration::from_secs(60), &c, Some(tx), None)
                 .await
         });
 

@@ -1,6 +1,6 @@
 use agent::{run_agent, Message, PermGate, RunEnv, ToolRegistry};
 use anyhow::Result;
-use ide_core::{AgentEvent, AgentRole};
+use ide_core::{AgentEvent, AgentRole, Permission, PermissionSet};
 
 /// How much of the pipeline a run uses. Picked by the user in the composer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +53,8 @@ pub async fn run_task(
             &env,
             history,
             None,
+            read_only_perms(),
+            None,
         )
         .await;
     }
@@ -62,13 +64,15 @@ pub async fn run_task(
         return spawn_role(
             AgentRole::Single,
             prompt,
-            model,
-            effort,
+            model.clone(),
+            effort.clone(),
             ToolRegistry::full(),
             true,
             &env,
             history,
             perm,
+            manual_perms(),
+            Some(subagent_runner(&env, model, effort)),
         )
         .await;
     }
@@ -84,6 +88,8 @@ pub async fn run_task(
             true,
             &env,
             history,
+            None,
+            read_only_perms(),
             None,
         )
         .await;
@@ -112,6 +118,8 @@ pub async fn run_task(
         &env,
         history,
         perm.clone(),
+        read_only_perms(),
+        Some(subagent_runner(&env, model.clone(), effort.clone())),
     )
     .await?;
 
@@ -158,6 +166,8 @@ pub async fn run_task(
             &env,
             Vec::new(),
             perm.clone(),
+            coder_perms(mode),
+            Some(subagent_runner(&env, model.clone(), effort.clone())),
         )
         .await?;
 
@@ -173,6 +183,8 @@ pub async fn run_task(
             false,
             &env,
             Vec::new(),
+            None,
+            read_only_perms(),
             None,
         )
         .await?;
@@ -242,6 +254,64 @@ mod greeting_tests {
     }
 }
 
+/// Lets an agent delegate. The child runs the same loop with its own agent
+/// definition, its own permissions and a fresh context; only its final message
+/// comes back. It gets no runner of its own, so delegation cannot recurse.
+fn subagent_runner(env: &RunEnv, model: String, effort: String) -> agent::SubagentRunner {
+    let env = env.clone();
+    std::sync::Arc::new(move |def: &'static agent::agents::AgentDef, prompt, cancel| {
+        let env = env.clone();
+        let model = model.clone();
+        let effort = effort.clone();
+        Box::pin(async move {
+            let perms = def.permissions();
+            let tools = ToolRegistry::for_permissions(&perms);
+            let mut child = env.clone();
+            child.cancel = cancel;
+            run_agent(
+                AgentRole::Single,
+                format!("{}\n\n{prompt}", def.prompt),
+                model,
+                effort,
+                tools,
+                false,
+                &child,
+                Vec::new(),
+                None,
+                perms,
+                None,
+            )
+            .await
+        })
+    })
+}
+
+/// Modes are now presets over the permission model rather than a separate
+/// mechanism. Keeping them means the existing composer keeps working while the
+/// agent definitions in `agent::agents` take over underneath.
+fn read_only_perms() -> PermissionSet {
+    PermissionSet::from_pairs(&[
+        ("edit_file", Permission::Deny),
+        ("write_file", Permission::Deny),
+        ("run_command", Permission::Deny),
+        // A read-only role must not reach the shell by delegating to `general`.
+        ("task", Permission::Deny),
+    ])
+}
+
+/// Manual asks before every shell command; everything else runs freely.
+fn manual_perms() -> PermissionSet {
+    PermissionSet::from_pairs(&[("run_command", Permission::Ask)])
+}
+
+fn coder_perms(mode: Mode) -> PermissionSet {
+    if mode == Mode::Approve {
+        PermissionSet::from_pairs(&[("run_command", Permission::Deny)])
+    } else {
+        PermissionSet::allow_all()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_role(
     role: AgentRole,
@@ -253,14 +323,17 @@ async fn spawn_role(
     env: &RunEnv,
     seed: Vec<Message>,
     perm: Option<PermGate>,
+    perms: ide_core::PermissionSet,
+    spawn: Option<agent::SubagentRunner>,
 ) -> Result<String> {
     // A panicking role must degrade into an error, not kill the whole
     // pipeline task silently.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String>>(1);
     let env = env.clone();
     let handle = tokio::spawn(async move {
-        let r = run_agent(role, prompt, model, effort, tools, announce_done, &env, seed, perm)
-            .await;
+        let r =
+            run_agent(role, prompt, model, effort, tools, announce_done, &env, seed, perm, perms, spawn)
+                .await;
         let _ = tx.send(r).await;
     });
     let out = rx

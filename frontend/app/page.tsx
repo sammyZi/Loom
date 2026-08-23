@@ -75,6 +75,9 @@ export default function Page() {
   // known value afterwards), driven by backend `context` events.
   // Open approval request from manual mode's shell gate.
   const [pendingAsk, setPendingAsk] = useState<{ id: string; program: string; args: string } | null>(null);
+  // The agent's plan for a multi-step job. Cleared per run, not per turn, so it
+  // survives the tool calls in between.
+  const [todos, setTodos] = useState<import("@/lib/api").TodoItem[]>([]);
   // Archived chats view in the sidebar.
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archived, setArchived] = useState<SessionLite[]>([]);
@@ -276,6 +279,9 @@ export default function Page() {
     if (ev.type === "ask") {
       setPendingAsk({ id: ev.id, program: ev.program, args: ev.args });
     }
+    if (ev.type === "todos") {
+      setTodos(ev.items);
+    }
     if (ev.type === "done" || ev.type === "error") {
       myRun.current = false;
       setBusy(false);
@@ -385,6 +391,8 @@ export default function Page() {
   async function run(text: string, meta: SubmitMeta) {
     setErr("");
     if (!text.trim() || busy) return;
+    // Last run's plan is not this run's plan.
+    setTodos([]);
 
     // meta.model is already a full "provider/model" selection.
     const id = meta.model || catalog?.default || "deepseek/deepseek-chat";
@@ -582,6 +590,7 @@ export default function Page() {
             phase={phase}
             elapsed={elapsed}
             tokens={tokens}
+            todos={todos}
             pending={pendingAsk}
             onDecide={decideAsk}
           />

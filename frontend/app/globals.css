@@ -1381,6 +1381,25 @@ body.dragging-col {
 }
 .term-body:focus, .term-body:focus-visible { outline: none; }
 
+/* ---------- agent task list ---------- */
+.todos {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.todo { display: flex; align-items: baseline; gap: 9px; font-size: 13px; color: var(--text-2); }
+.todo-mark { width: 13px; flex-shrink: 0; text-align: center; color: var(--faint); font-size: 11px; }
+.todo.done { color: var(--muted); }
+.todo.done .todo-text { text-decoration: line-through; text-decoration-color: var(--border-2); }
+.todo.done .todo-mark { color: var(--ok); }
+.todo.running { color: var(--text); }
+.todo.running .todo-mark { color: var(--accent-hi); }
+
 /* ---------- activity rows (thinking / read / edit / run) ---------- */
 .act { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--muted); }
 .act-verb { color: var(--text-2); flex-shrink: 0; }

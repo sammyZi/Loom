@@ -2,6 +2,7 @@
 
 import { IconMark } from "@/components/Icons";
 import { CopyButton, Markdown, SpeakButton } from "@/components/Markdown";
+import type { TodoItem } from "@/lib/api";
 import { groupLog, secs, type LogItem } from "@/lib/log";
 import { useEffect, useRef } from "react";
 
@@ -12,6 +13,7 @@ export function Feed({
   phase,
   elapsed,
   tokens,
+  todos = [],
   pending,
   onDecide,
 }: {
@@ -21,6 +23,8 @@ export function Feed({
   phase: string;
   elapsed: number;
   tokens: number;
+  /** The agent's task list for a multi-step job. */
+  todos?: TodoItem[];
   /** Open approval request (manual mode): the agent wants to run a command. */
   pending?: { id: string; program: string; args: string } | null;
   onDecide?: (allow: boolean) => void;
@@ -86,6 +90,21 @@ export function Feed({
                 Deny
               </button>
             </div>
+          </div>
+        )}
+
+        {/* The plan, above the status line: on a long job this is the only
+            thing that says how much is left. */}
+        {todos.length > 0 && (
+          <div className="todos">
+            {todos.map((t, i) => (
+              <div key={i} className={`todo ${t.status}`}>
+                <span className="todo-mark" aria-hidden>
+                  {t.status === "done" ? "✓" : t.status === "running" ? "→" : "○"}
+                </span>
+                <span className="todo-text">{t.text}</span>
+              </div>
+            ))}
           </div>
         )}
 

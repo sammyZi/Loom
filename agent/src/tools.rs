@@ -1,7 +1,9 @@
 use anyhow::Context as _;
 use anyhow::Result;
 use async_trait::async_trait;
-use ide_core::{AgentEvent, CommandOutput, ShellEvent, ShellRegistry, WorkspaceRoot};
+use ide_core::{
+    AgentEvent, CommandOutput, Permission, PermissionSet, ShellEvent, ShellRegistry, WorkspaceRoot,
+};
 use sandbox::Sandbox;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
@@ -52,6 +54,58 @@ pub struct ToolCtx {
     pub shells: ShellRegistry,
     /// Present when every shell command needs explicit user approval first.
     pub perm: Option<PermGate>,
+    /// What this agent may do. Consulted per call, so one tool can be free for
+    /// `git status` and refused for `git push`.
+    pub perms: PermissionSet,
+    /// Present only for agents allowed to delegate. A subagent gets None, so a
+    /// child cannot spawn children and recurse forever.
+    pub spawn_subagent: Option<SubagentRunner>,
+}
+
+impl ToolCtx {
+    /// Decide one call, and for `ask` block until the user answers. Returns the
+    /// refusal text to hand back to the model, or None to go ahead.
+    ///
+    /// Handing a refusal back as a *result* rather than an error matters: the
+    /// model reads it, adapts, and carries on, instead of the run dying.
+    pub async fn gate(
+        &self,
+        tool: &str,
+        detail: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>> {
+        match self.perms.decide(tool, detail) {
+            Permission::Allow => Ok(None),
+            Permission::Deny => Ok(Some(format!(
+                "refused: `{tool}` is denied for this agent{}. Do not retry it; say what you \
+                 needed it for and continue without it.",
+                if detail.is_empty() { String::new() } else { format!(" on `{detail}`") }
+            ))),
+            Permission::Ask => {
+                let Some(gate) = &self.perm else {
+                    // No UI is listening, so an unanswerable prompt would hang
+                    // the run forever. Treat it as allowed and move on.
+                    return Ok(None);
+                };
+                let id = format!("perm-{}", uuid_like());
+                let _ = self.events.send(AgentEvent::Ask {
+                    id: id.clone(),
+                    program: tool.to_string(),
+                    args: detail.to_string(),
+                });
+                let rx = gate.ask(id);
+                let allowed = tokio::select! {
+                    r = rx => r.unwrap_or(false),
+                    _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+                };
+                Ok((!allowed).then(|| {
+                    "user declined this. Do not retry it; adapt: describe what you needed and \
+                     continue without it."
+                        .to_string()
+                }))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -76,9 +130,13 @@ impl ToolRegistry {
                 Box::new(WebFetch),
                 Box::new(ReadFile),
                 Box::new(EditFile),
+                Box::new(WriteFile),
                 Box::new(RunCommand),
                 Box::new(CheckCode),
                 Box::new(RunTests),
+                Box::new(TodoWrite),
+                Box::new(AskUser),
+                Box::new(Task),
             ],
         }
     }
@@ -117,6 +175,21 @@ impl ToolRegistry {
         Self { tools: vec![] }
     }
 
+    /// Every tool the permissions still allow. This replaces the fixed
+    /// `full`/`no_shell`/`read_only` trio: a denied tool is left out of the
+    /// schema entirely, so the model never calls it and never has to explain
+    /// that it cannot — which is exactly what made the old Approve mode read
+    /// as a broken agent rather than a deliberate setting.
+    pub fn for_permissions(perms: &PermissionSet) -> Self {
+        Self {
+            tools: Self::full()
+                .tools
+                .into_iter()
+                .filter(|t| perms.offers(t.name()))
+                .collect(),
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &dyn Tool> {
         self.tools.iter().map(|t| t.as_ref())
     }
@@ -148,6 +221,23 @@ struct EditFile;
 struct RunCommand;
 struct CheckCode;
 struct RunTests;
+struct WriteFile;
+struct TodoWrite;
+struct AskUser;
+struct Task;
+
+/// Runs one subagent to completion and returns its final message. Boxed as a
+/// callback because the orchestrator owns the pipeline; the tools crate cannot
+/// depend on it without a cycle.
+pub type SubagentRunner = Arc<
+    dyn Fn(
+            &'static crate::agents::AgentDef,
+            String,
+            CancellationToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[async_trait]
 impl Tool for ListFiles {
@@ -731,13 +821,16 @@ impl Tool for ReadFile {
         "read_file"
     }
     fn description(&self) -> &'static str {
-        "Read a text file in the opened workspace. Path is relative to the workspace root."
+        "Read a text file in the opened workspace. Path is relative to the workspace root. \
+         Give offset and limit to read one slice of a large file instead of all of it."
     }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Workspace-relative path" }
+                "path": { "type": "string", "description": "Workspace-relative path" },
+                "offset": { "type": "integer", "description": "First line to return, 1-based" },
+                "limit": { "type": "integer", "description": "How many lines to return" }
             },
             "required": ["path"]
         })
@@ -745,7 +838,192 @@ impl Tool for ReadFile {
     async fn call(&self, ctx: &ToolCtx, input: Value, _cancel: &CancellationToken) -> Result<String> {
         let path = input["path"].as_str().unwrap_or("");
         let raw = viewer::read_file(&ctx.ws, path)?;
-        Ok(crate::context::clip_file(path, &raw))
+        let offset = input["offset"].as_u64();
+        let limit = input["limit"].as_u64();
+        if offset.is_none() && limit.is_none() {
+            return Ok(crate::context::clip_file(path, &raw));
+        }
+        Ok(slice_lines(&raw, offset, limit))
+    }
+}
+
+/// A 1-based line window, numbered so the model can cite what it read and ask
+/// for the next slice. Reading a 5000-line file whole just to see one function
+/// is what burns a context window.
+pub fn slice_lines(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = offset.unwrap_or(1).max(1) as usize - 1;
+    if start >= lines.len() {
+        return format!("(file has {} lines; offset {} is past the end)", lines.len(), start + 1);
+    }
+    let take = limit.unwrap_or(2000).max(1) as usize;
+    let end = (start + take).min(lines.len());
+    let mut out = String::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        out.push_str(&format!("{:>6}\t{}\n", start + i + 1, line));
+    }
+    if end < lines.len() {
+        out.push_str(&format!("… {} more lines (next offset {})\n", lines.len() - end, end + 1));
+    }
+    out
+}
+
+#[async_trait]
+impl Tool for WriteFile {
+    fn name(&self) -> &'static str {
+        "write_file"
+    }
+    fn description(&self) -> &'static str {
+        "Create a file, or replace one whole. Use edit_file to change part of an existing \
+         file — this overwrites everything and is for new files or full rewrites."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Workspace-relative path" },
+                "content": { "type": "string" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, _cancel: &CancellationToken) -> Result<String> {
+        let path = input["path"].as_str().unwrap_or("").trim();
+        if path.is_empty() {
+            anyhow::bail!("path required");
+        }
+        let content = input["content"].as_str().unwrap_or("");
+        let existed = viewer::read_file(&ctx.ws, path).is_ok();
+        viewer::write_file(&ctx.ws, path, content)?;
+        Ok(format!(
+            "{} {path} ({} lines)",
+            if existed { "overwrote" } else { "created" },
+            content.lines().count()
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for TodoWrite {
+    fn name(&self) -> &'static str {
+        "todo_write"
+    }
+    fn description(&self) -> &'static str {
+        "Record the task list for a multi-step job and keep it current. Call it once when you \
+         start with every step pending, then again after each step to mark it done. Skip it \
+         for anything that is one or two steps."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "description": "The whole list every time, not just the changes.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string" },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "running", "done"]
+                            }
+                        },
+                        "required": ["text", "status"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, _cancel: &CancellationToken) -> Result<String> {
+        let todos = input["todos"].as_array().cloned().unwrap_or_default();
+        let items: Vec<(String, String)> = todos
+            .iter()
+            .filter_map(|t| {
+                Some((
+                    t["text"].as_str()?.to_string(),
+                    t["status"].as_str().unwrap_or("pending").to_string(),
+                ))
+            })
+            .collect();
+        // Surfaced as an event so the feed can render progress; the model gets
+        // the same list back so it stays anchored to it.
+        let _ = ctx.events.send(AgentEvent::Todos {
+            items: items
+                .iter()
+                .map(|(text, status)| ide_core::TodoItem {
+                    text: text.clone(),
+                    status: status.clone(),
+                })
+                .collect(),
+        });
+        Ok(render_todos(&items))
+    }
+}
+
+/// The list as the model should see it back: compact, and unambiguous about
+/// what is left. Returned rather than a bare "ok" so the plan survives a
+/// context compaction — the tool result carries it.
+pub fn render_todos(items: &[(String, String)]) -> String {
+    if items.is_empty() {
+        return "todo list cleared".into();
+    }
+    let done = items.iter().filter(|(_, s)| s == "done").count();
+    let mut out = format!("{done}/{} done\n", items.len());
+    for (text, status) in items {
+        let mark = match status.as_str() {
+            "done" => "x",
+            "running" => ">",
+            _ => " ",
+        };
+        out.push_str(&format!("[{mark}] {text}\n"));
+    }
+    out
+}
+
+#[async_trait]
+impl Tool for AskUser {
+    fn name(&self) -> &'static str {
+        "ask_user"
+    }
+    fn description(&self) -> &'static str {
+        "Ask the user one question when the task genuinely cannot proceed without their \
+         answer — a missing credential, or a choice only they can make. Do not use it for \
+         anything you could decide yourself or find in the repo."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string" }
+            },
+            "required": ["question"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, cancel: &CancellationToken) -> Result<String> {
+        let question = input["question"].as_str().unwrap_or("").trim().to_string();
+        if question.is_empty() {
+            anyhow::bail!("question required");
+        }
+        let Some(gate) = &ctx.perm else {
+            // Nothing is listening, so waiting would hang the run forever.
+            return Ok("no one is available to answer; decide it yourself and say what you \
+                       assumed."
+                .into());
+        };
+        let id = format!("ask-{}", uuid_like());
+        let _ = ctx.events.send(AgentEvent::Ask {
+            id: id.clone(),
+            program: "question".into(),
+            args: question.clone(),
+        });
+        let rx = gate.ask(id);
+        let yes = tokio::select! {
+            r = rx => r.unwrap_or(false),
+            _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+        };
+        Ok(if yes { "user answered yes".into() } else { "user answered no".into() })
     }
 }
 
@@ -854,6 +1132,20 @@ impl Tool for RunCommand {
             .unwrap_or_default();
         let background = input["background"].as_bool().unwrap_or(false);
 
+        // A server started in the foreground is doomed: run_foreground caps at
+        // 120s and kills the tree on return, so `npm run dev` came up and died
+        // the moment the tool replied. Asking for background:true in the prompt
+        // was not enough, so the wrong call is refused with the fix in hand.
+        if !background && looks_long_running(&program, &args) {
+            return Ok(format!(
+                "refused: `{program} {}` looks like a server or watcher, and a foreground run is \
+                 killed when this call returns (120s cap). Call run_command again with \
+                 background:true — it will keep running, get its own terminal tab, and print the \
+                 port it bound to.",
+                args.join(" ")
+            ));
+        }
+
         // Manual mode: every shell command needs an explicit yes, the way
         // coding agents ask before touching a terminal.
         if let Some(gate) = &ctx.perm {
@@ -886,6 +1178,125 @@ impl Tool for RunCommand {
 /// The id every agent shell chunk streams under; the terminal panel maps it to
 /// its read-only Agent tab.
 pub const AGENT_STREAM_ID: &str = "agent";
+
+#[async_trait]
+impl Tool for Task {
+    fn name(&self) -> &'static str {
+        "task"
+    }
+    fn description(&self) -> &'static str {
+        "Hand one self-contained job to a subagent, which works in its own context and returns \
+         only its final answer. Use `explore` to find where something lives in this repo, \
+         `scout` to research external docs or a dependency, and `general` for a multi-step job \
+         you want kept out of your own context. Give it everything it needs in one prompt — it \
+         cannot see this conversation."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "enum": ["explore", "scout", "general"],
+                    "description": "Which subagent to run"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "The whole task, self-contained."
+                }
+            },
+            "required": ["agent", "prompt"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, cancel: &CancellationToken) -> Result<String> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        let id = input["agent"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+        let prompt = input["prompt"].as_str().unwrap_or("").trim().to_string();
+        if prompt.is_empty() {
+            anyhow::bail!("prompt required");
+        }
+        let Some(def) = crate::agents::agent_def(&id) else {
+            anyhow::bail!("unknown agent `{id}`");
+        };
+        if !matches!(def.mode, crate::agents::AgentMode::Subagent | crate::agents::AgentMode::All) {
+            anyhow::bail!("`{id}` is a primary agent and cannot be delegated to");
+        }
+        // The parent's own permissions still bound the child: a plan-mode agent
+        // must not be able to reach the shell by delegating to `general`.
+        if ctx.perms.decide("task", &id) == Permission::Deny {
+            return Ok(format!("refused: delegating to `{id}` is denied for this agent."));
+        }
+        let _ = ctx.events.send(AgentEvent::Status {
+            message: format!("{} subagent", def.label),
+        });
+        let runner = ctx
+            .spawn_subagent
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("subagents are not available in this run"))?;
+        let out = runner(def, prompt, cancel.clone()).await?;
+        // Only the final answer comes back; the child's tool traffic stays in
+        // its own context, which is the whole point of delegating.
+        Ok(out)
+    }
+}
+
+/// The thing a permission rule matches against: the command line for shell
+/// calls, the path for file calls, the URL for web calls. Without this, rules
+/// could only say yes or no to a whole tool.
+pub fn call_subject(tool: &str, input: &Value) -> String {
+    match tool {
+        "run_command" => {
+            let program = input["program"].as_str().unwrap_or("");
+            let args: Vec<&str> = input["args"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            if args.is_empty() {
+                program.to_string()
+            } else {
+                format!("{program} {}", args.join(" "))
+            }
+        }
+        "read_file" | "edit_file" | "write_file" | "list_files" => {
+            input["path"].as_str().unwrap_or("").to_string()
+        }
+        "web_fetch" => input["url"].as_str().unwrap_or("").to_string(),
+        "web_search" => input["query"].as_str().unwrap_or("").to_string(),
+        "search_files" => input["query"].as_str().unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Commands that serve or watch rather than finish. Deliberately conservative:
+/// a false positive only costs the model one retry with background:true, while
+/// a false negative silently kills the user's dev server.
+pub fn looks_long_running(program: &str, args: &[String]) -> bool {
+    const SERVER_EXES: &[&str] = &[
+        "next", "vite", "nodemon", "webpack-dev-server", "http-server", "serve", "live-server",
+    ];
+    const SERVER_WORDS: &[&str] = &["dev", "serve", "start", "watch", "preview"];
+
+    let exe = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    if SERVER_EXES.contains(&exe.as_str()) {
+        return true;
+    }
+    // `npm run dev`, `pnpm dev`, `yarn start`, `bun run serve`…
+    let runner = matches!(exe.as_str(), "npm" | "pnpm" | "yarn" | "bun" | "npx" | "deno");
+    if !runner {
+        return false;
+    }
+    args.iter().any(|a| {
+        let a = a.trim().to_ascii_lowercase();
+        // A runner can also name the server binary outright: `npx vite`.
+        SERVER_WORDS.contains(&a.as_str()) || SERVER_EXES.contains(&a.as_str())
+    })
+}
 
 fn echo_line(ws: &WorkspaceRoot, program: &str, args: &[String]) -> String {
     format!("{}> {program} {}\n", ws.root().display(), args.join(" "))
@@ -1161,6 +1572,135 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    #[test]
+    fn read_slices_are_numbered_and_say_what_is_left() {
+        let text = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let out = slice_lines(&text, Some(3), Some(2));
+        assert!(out.contains("     3\tline3"), "{out}");
+        assert!(out.contains("     4\tline4"), "{out}");
+        assert!(!out.contains("line5"), "limit must be respected: {out}");
+        // The model needs to know how to ask for the rest.
+        assert!(out.contains("6 more lines"), "{out}");
+        assert!(out.contains("next offset 5"), "{out}");
+    }
+
+    #[test]
+    fn read_slice_past_the_end_says_so_rather_than_returning_nothing() {
+        let out = slice_lines("a\nb", Some(99), None);
+        assert!(out.contains("2 lines"), "{out}");
+        assert!(out.contains("past the end"), "{out}");
+    }
+
+    /// Offset 0 is a common off-by-one from a model; clamp instead of panicking.
+    #[test]
+    fn read_slice_clamps_a_zero_offset() {
+        let out = slice_lines("a\nb", Some(0), Some(1));
+        assert!(out.contains("     1\ta"), "{out}");
+    }
+
+    #[test]
+    fn todos_render_progress_the_model_can_act_on() {
+        let items = vec![
+            ("wire the route".to_string(), "done".to_string()),
+            ("add the test".to_string(), "running".to_string()),
+            ("update docs".to_string(), "pending".to_string()),
+        ];
+        let out = render_todos(&items);
+        assert!(out.starts_with("1/3 done"), "{out}");
+        assert!(out.contains("[x] wire the route"), "{out}");
+        assert!(out.contains("[>] add the test"), "{out}");
+        assert!(out.contains("[ ] update docs"), "{out}");
+        assert_eq!(render_todos(&[]), "todo list cleared");
+    }
+
+    /// Permission rules match this string, so getting it wrong silently makes
+    /// every `bash` rule fire on an empty subject and match `*` only.
+    #[test]
+    fn call_subject_extracts_what_rules_match_on() {
+        let cmd = json!({ "program": "git", "args": ["push", "--force"] });
+        assert_eq!(call_subject("run_command", &cmd), "git push --force");
+        // no args: still the bare program, not "git "
+        assert_eq!(call_subject("run_command", &json!({ "program": "date" })), "date");
+        assert_eq!(
+            call_subject("read_file", &json!({ "path": "src/main.rs" })),
+            "src/main.rs"
+        );
+        assert_eq!(call_subject("web_fetch", &json!({ "url": "https://x.dev" })), "https://x.dev");
+        assert_eq!(call_subject("check_code", &json!({})), "");
+    }
+
+    /// The registry is now derived, so a denied tool must genuinely disappear
+    /// from the schema the model sees.
+    #[test]
+    fn denied_tools_are_absent_from_the_schema() {
+        let perms = PermissionSet::from_pairs(&[
+            ("run_command", Permission::Deny),
+            ("edit_file", Permission::Deny),
+        ]);
+        let reg = ToolRegistry::for_permissions(&perms);
+        let names: Vec<&str> = reg.iter().map(|t| t.name()).collect();
+        assert!(!names.contains(&"run_command"), "{names:?}");
+        assert!(!names.contains(&"edit_file"), "{names:?}");
+        assert!(names.contains(&"read_file"), "{names:?}");
+        // and the schema list agrees with iter()
+        assert_eq!(reg.schemas().len(), names.len());
+    }
+
+    #[test]
+    fn ask_keeps_the_tool_available() {
+        let perms = PermissionSet::from_pairs(&[("run_command", Permission::Ask)]);
+        let names: Vec<&str> = ToolRegistry::for_permissions(&perms)
+            .iter()
+            .map(|t| t.name())
+            .collect();
+        assert!(names.contains(&"run_command"), "ask must not hide the tool");
+    }
+}
+
+#[cfg(test)]
+mod long_running_tests {
+    use super::looks_long_running;
+
+    fn a(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The bug: a dev server run in the foreground is killed the moment the
+    /// tool returns, so "start the app" started it and immediately stopped it.
+    #[test]
+    fn catches_the_dev_server_shapes_that_died() {
+        assert!(looks_long_running("npm", &a(&["run", "dev"])));
+        assert!(looks_long_running("npm", &a(&["start"])));
+        assert!(looks_long_running("pnpm", &a(&["dev"])));
+        assert!(looks_long_running("yarn", &a(&["serve"])));
+        assert!(looks_long_running("bun", &a(&["run", "preview"])));
+        assert!(looks_long_running("npx", &a(&["vite", "--host"])));
+        // bare binaries, and with a path or extension
+        assert!(looks_long_running("vite", &[]));
+        assert!(looks_long_running("next", &a(&["dev"])));
+        assert!(looks_long_running("nodemon", &a(&["server.js"])));
+        assert!(looks_long_running("C:\\bin\\npm.cmd", &a(&["run", "dev"])));
+    }
+
+    /// One-shot commands must still run in the foreground — the agent needs
+    /// their output, and refusing them would break installs and builds.
+    #[test]
+    fn leaves_one_shot_commands_alone() {
+        assert!(!looks_long_running("npm", &a(&["install"])));
+        assert!(!looks_long_running("npm", &a(&["run", "build"])));
+        assert!(!looks_long_running("npm", &a(&["run", "lint"])));
+        assert!(!looks_long_running("git", &a(&["status"])));
+        assert!(!looks_long_running("cargo", &a(&["test"])));
+        assert!(!looks_long_running("date", &[]));
+        // "start" only counts behind a package runner, not any binary at all
+        assert!(!looks_long_running("git", &a(&["start"])));
+    }
 }
 
 #[cfg(test)]

@@ -35,6 +35,8 @@ pub async fn run_agent(
     env: &RunEnv,
     seed: Vec<Message>,
     perm: Option<PermGate>,
+    perms: ide_core::PermissionSet,
+    spawn_subagent: Option<crate::tools::SubagentRunner>,
 ) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -47,6 +49,8 @@ pub async fn run_agent(
         shell_tx: env.shell_tx.clone(),
         shells: env.shells.clone(),
         perm,
+        perms,
+        spawn_subagent,
     };
     let mut messages = seed;
     messages.push(Message::user_text(prompt));
@@ -149,12 +153,19 @@ pub async fn run_agent(
             if env.cancel.is_cancelled() {
                 anyhow::bail!("cancelled");
             }
-            let output = match tools.get(&t.name) {
-                Some(tool) => tool
-                    .call(&ctx, t.input, &env.cancel)
-                    .await
-                    .unwrap_or_else(|e| e.to_string()),
-                None => format!("unknown tool {}", t.name),
+            // One gate for every tool, checked against the call's own subject,
+            // so `git status` can be free while `git push` is refused. Gating
+            // inside individual tools only ever covered run_command.
+            let subject = crate::tools::call_subject(&t.name, &t.input);
+            let output = match ctx.gate(&t.name, &subject, &env.cancel).await? {
+                Some(refusal) => refusal,
+                None => match tools.get(&t.name) {
+                    Some(tool) => tool
+                        .call(&ctx, t.input, &env.cancel)
+                        .await
+                        .unwrap_or_else(|e| e.to_string()),
+                    None => format!("unknown tool {}", t.name),
+                },
             };
             let _ = env.events.send(AgentEvent::ToolResult {
                 name: t.name.clone(),
@@ -197,6 +208,11 @@ the terminal panel. Do not start the same background job twice. A dev server pri
 port it actually bound to — read it from that output and use it. Never assume the default port: \
 it moves when the port is busy (Next falls back to 3001), so checking the wrong one reports a \
 server that is not yours. \
+Answer questions about this machine by running the command, never by refusing: the date and \
+time, tool versions, disk contents and git state are all one run_command away. \
+Do the task the user actually asked for and stop. 'Start the app' means start it — not install, \
+not build, not lint, not test. Run extra commands only when the task needs them or something \
+failed. \
 You have internet access through web_search (find pages) and web_fetch (read one page); prefer \
 official docs over blog guesses and never fabricate a URL. Use search_files to locate code by \
 content instead of reading files one by one. Edits must be minimal; edit_file replaces exact \
@@ -213,13 +229,17 @@ carries out the plan, so 'I can't run commands' is wrong and confusing. Plan the
 do not hand it back for the user to type."
         ),
         AgentRole::Coder => format!(
-            "{common}\nYou are the coder. Implement the given plan with edit_file. \
-Then check_code and run_tests. Fix failures. Reply with a short summary of files changed."
+            "{common}\nYou are the coder. Carry out the plan. Only *code changes* get \
+check_code and run_tests afterwards — a task that runs or inspects something is finished when \
+it has run, and following it with a build or test suite wastes the user's time. \
+Reply with the result: for a change, the files touched; for a command, what it did and the \
+URL or output that matters."
         ),
         AgentRole::Reviewer => format!(
             "{common}\nYou are the reviewer. Inspect changed files with read_file. \
-Run check_code and run_tests. If tests/compiler fail, say REVISE and list exact fixes. \
-If they pass, say APPROVED and a one-line summary."
+If no files were changed — the task only ran or inspected something — reply APPROVED at once \
+and run nothing. Otherwise run check_code and run_tests: if they fail, say REVISE and list \
+exact fixes; if they pass, say APPROVED and a one-line summary."
         ),
         AgentRole::Single => format!(
             "{common}\nYou are chatting in the IDE and can use tools directly. Shell commands \
