@@ -1,13 +1,18 @@
 # Loom
 
-A local AI coding agent with an IDE around it. One Rust binary serves the API, an
-embedded web UI, and the agent itself — open a folder and it works in that folder,
-on your machine, with your own provider keys.
+A local AI coding agent with an IDE around it. One Rust binary is the desktop
+app: it serves the API, hosts the embedded web UI in its own window, and runs the
+agent itself — open a folder and it works in that folder, on your machine, with
+your own provider keys.
 
 ```bash
 cargo build -p cli
 ./target/debug/ide-ai.exe        # opens the Loom window (serves http://127.0.0.1:8080)
 ```
+
+The window is a `tao` window with a `wry` webview pointed at the local server —
+no browser, no tabs. On Windows that webview is Edge WebView2, which ships with
+Windows 11.
 
 Windows only for now: the sandbox is built on Job Objects and restricted tokens
 (see [Sandbox](#sandbox)). Everything else is portable.
@@ -31,7 +36,9 @@ Windows only for now: the sandbox is built on Job Objects and restricted tokens
 
 ```
 cli/           axum HTTP + websockets, SQLite session store, embedded UI
+  main.rs        the desktop window (tao + wry); the server runs behind it
   routes.rs      every endpoint; /ws/agent, /ws/shell, /ws/files
+  icon.py        redraws the app's brand mark into icon.ico (exe + window icon)
 orchestrator/  run modes: which agents run, in what order, with which permissions
 agent/         the model loop, tools, providers, skills, compaction
   loop_.rs       the agentic loop: stream → tool calls → repeat
@@ -56,7 +63,9 @@ cd frontend && npx next build     # regenerates frontend/out
 cd .. && cargo build -p cli       # re-embeds it
 ```
 
-For UI work, run the dev server instead — it proxies the API on :8080:
+For UI work, run the dev server instead — it proxies the API on :8080. Keep the
+app running for the backend and open the dev server in a browser; :3000 is
+allow-listed for CORS (add others with `IDE_AI_EXTRA_ORIGIN`):
 
 ```bash
 cd frontend && npm run dev        # http://localhost:3000
