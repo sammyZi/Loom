@@ -1,0 +1,253 @@
+@import "tailwindcss";
+
+@theme {
+  /* palette — warm parchment canvas, one saturated accent */
+  --color-parchment: #f6f3f1;
+  --color-lake-blue: #2b59d1;
+  --color-periwinkle-mist: #cfdaf5;
+  --color-sky-blue: #a0b5eb;
+  --color-mint: #a7fccd;
+  --color-coral: #ff9473;
+  --color-gold: #ecda98;
+  --color-crimson: #f37a0a;
+  --color-off-black: #242424;
+  --color-ink: #000000;
+  --color-graphite: #4e4d4d;
+  --color-smoke: #797776;
+  --color-ash: #cecac8;
+
+  /* the serif announces, the mono instructs */
+  --font-serif: var(--font-newsreader), ui-serif, Georgia, "Times New Roman",
+    serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  --text-caption: 12px;
+  --text-caption--line-height: 1.2;
+  --text-caption--letter-spacing: -0.033em;
+  --text-body-sm: 14px;
+  --text-body-sm--line-height: 1.35;
+  --text-body-sm--letter-spacing: -0.02em;
+  --text-body: 16px;
+  --text-body--line-height: 1.35;
+  --text-body--letter-spacing: -0.025em;
+  --text-label: 18px;
+  --text-label--line-height: 1.2;
+  --text-label--letter-spacing: -0.022em;
+  --text-body-lg: 20px;
+  --text-body-lg--line-height: 1.35;
+  --text-body-lg--letter-spacing: -0.02em;
+  --text-subheading: 24px;
+  --text-subheading--line-height: 1.2;
+  --text-subheading--letter-spacing: -0.02em;
+  --text-heading-sm: 32px;
+  --text-heading-sm--line-height: 1.2;
+  --text-heading-sm--letter-spacing: -0.02em;
+  --text-heading: 40px;
+  --text-heading--line-height: 1.2;
+  --text-heading--letter-spacing: -0.02em;
+  --text-heading-lg: 48px;
+  --text-heading-lg--line-height: 1.2;
+  --text-heading-lg--letter-spacing: -0.02em;
+  --text-display: 80px;
+  --text-display--line-height: 1.2;
+  --text-display--letter-spacing: -0.02em;
+
+  /* pill-and-soft-rect: never sharper than these */
+  --radius-card: 40px;
+  --radius-pill: 9999px;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+::selection {
+  background: var(--color-periwinkle-mist);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-lake-blue);
+  outline-offset: 3px;
+}
+
+/* component classes live in the components layer so utilities still win */
+@layer components {
+  /* buttons — pills only, no shadows */
+  .btn-blue {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-pill border border-transparent bg-lake-blue px-6 py-3 font-mono text-body-sm uppercase text-parchment transition-colors duration-150 select-none hover:bg-lake-blue/90;
+  }
+  .btn-black {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-pill border border-transparent bg-off-black px-6 py-3 font-mono text-body-sm uppercase text-parchment transition-colors duration-150 select-none hover:bg-off-black/85;
+  }
+  .btn-ghost {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-pill border border-off-black px-6 py-3 font-mono text-body-sm uppercase text-off-black transition-colors duration-150 select-none hover:bg-off-black/5;
+  }
+
+  /* cards — hairline borders carry elevation, never shadow */
+  .card {
+    @apply rounded-card border border-ash p-10;
+  }
+
+  /* pill tag, used by the pipeline diagram and inline labels */
+  .tag {
+    @apply inline-flex items-center gap-2 rounded-pill border border-ash bg-parchment px-5 py-3 font-mono text-body-sm uppercase text-off-black;
+  }
+
+  .icode {
+    @apply rounded-pill border border-ash px-2 py-0.5 font-mono text-[0.9em];
+  }
+}
+
+/* native details toggle — no group-open variant needed */
+.chev {
+  display: inline-block;
+  transition: transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+details[open] .chev {
+  transform: rotate(180deg);
+}
+
+/* accordion open/close rides ::details-content; browsers without it just snap */
+:root {
+  interpolate-size: allow-keywords;
+}
+.faq::details-content {
+  block-size: 0;
+  overflow: hidden;
+  transition:
+    block-size 0.35s cubic-bezier(0.2, 0.7, 0.2, 1),
+    content-visibility 0.35s allow-discrete;
+}
+.faq[open]::details-content {
+  block-size: auto;
+}
+.faq .faq-body {
+  opacity: 0;
+  translate: 0 -6px;
+  transition:
+    opacity 0.3s ease 0.05s,
+    translate 0.3s ease 0.05s;
+}
+.faq[open] .faq-body {
+  opacity: 1;
+  translate: 0 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .faq::details-content,
+  .faq .faq-body,
+  .chev {
+    transition: none;
+  }
+}
+
+/* decorative band — the pastel palette as a hairline rule */
+.band {
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--color-coral),
+    var(--color-gold),
+    var(--color-mint),
+    var(--color-sky-blue),
+    var(--color-periwinkle-mist)
+  );
+}
+
+/* announcement ticker — duplicated track, translated by half its width */
+.marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 40s linear infinite;
+}
+@keyframes marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .marquee {
+    animation: none;
+  }
+}
+
+/* motion — scroll reveal rides the native view timeline, no JS, no observer */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rise {
+    animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    animation-delay: var(--d, 0s);
+  }
+  @supports (animation-timeline: view()) {
+    .reveal {
+      animation: rise ease-out both;
+      animation-timeline: view();
+      animation-range: entry 8% cover 32%;
+    }
+  }
+}
+
+.arrow {
+  display: inline-block;
+  transition: translate 0.15s ease;
+}
+a:hover > .arrow,
+button:hover > .arrow {
+  translate: 4px 0;
+}
+
+/* legal pages — one prose block, editorial measure */
+.legal h2 {
+  font-family: var(--font-serif);
+  font-size: var(--text-subheading);
+  letter-spacing: var(--text-subheading--letter-spacing);
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--color-ash);
+}
+.legal p {
+  margin-top: 1.25rem;
+  color: var(--color-graphite);
+  max-width: 62ch;
+}
+.legal a {
+  color: var(--color-lake-blue);
+  text-underline-offset: 3px;
+  text-decoration: underline;
+}
+
+/* headline emphasis — a brush swash under the claim, painted left to right */
+.mark {
+  position: relative;
+  white-space: nowrap;
+}
+.swash {
+  position: absolute;
+  inset-inline: -0.06em;
+  bottom: -0.24em;
+  width: calc(100% + 0.12em);
+  height: 0.22em;
+  overflow: visible;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .swash {
+    animation: paint 0.75s cubic-bezier(0.35, 0.6, 0.3, 1) 0.55s both;
+  }
+}
+@keyframes paint {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}

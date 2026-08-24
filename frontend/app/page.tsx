@@ -61,6 +61,40 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+/** Longest edge a sent image is scaled down to. Vision models downsample to
+ *  about this anyway, so anything larger is pure upload and token cost. */
+const MAX_IMAGE_EDGE = 1568;
+
+/**
+ * A data URL small enough to send. A phone photo is tens of megabytes as
+ * base64 — past the request limit, and wasted tokens even when it fits — so
+ * anything oversized is scaled down and re-encoded. Small images pass through
+ * untouched, keeping screenshots pixel-exact.
+ */
+async function imageToDataUrl(file: File): Promise<string> {
+  const original = await fileToDataUrl(file);
+  const img = await new Promise<HTMLImageElement | null>((resolve) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => resolve(null);
+    el.src = original;
+  });
+  if (!img) return original; // undecodable: send as-is rather than losing it
+  const longest = Math.max(img.naturalWidth, img.naturalHeight);
+  if (longest <= MAX_IMAGE_EDGE && original.length < 1_500_000) return original;
+
+  const scale = Math.min(1, MAX_IMAGE_EDGE / longest);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return original;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  // JPEG: alpha rarely matters for a reference image, and PNG of a photo
+  // would undo most of the saving.
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
 export default function Page() {
   const [folder, setFolder] = useState<string | null>(null);
   const [git, setGit] = useState<Git | null>(null);
@@ -509,7 +543,7 @@ export default function Page() {
     // own tools can copy/reference the real file) and hands the model an
     // actual vision block, not just a filename mention.
     const images = await Promise.all(
-      meta.attachments.map(async (f) => ({ name: f.name, data_url: await fileToDataUrl(f) })),
+      meta.attachments.map(async (f) => ({ name: f.name, data_url: await imageToDataUrl(f) })),
     );
     // The bubble shows the image too — kept as a data URL so it round-trips
     // through the session's stored JSON log and is still there on reload.

@@ -2,6 +2,9 @@
 /frontend/node_modules
 /frontend/.next
 /frontend/out
+/website/node_modules
+/website/.next
+/website/out
 **/*.pdb
 .idea
 .vscode

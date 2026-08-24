@@ -2,7 +2,7 @@ use crate::state::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Query, State, WebSocketUpgrade,
+        DefaultBodyLimit, Query, State, WebSocketUpgrade,
     },
     http::StatusCode,
     response::IntoResponse,
@@ -15,6 +15,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
+
+/// Upload ceiling for the two routes that carry attached images. Generous
+/// enough for a handful of screenshots, bounded so a runaway request cannot
+/// balloon memory.
+const BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -29,13 +34,22 @@ pub fn router() -> Router<AppState> {
         .route("/git/status", get(git_status))
         .route("/git/diff", get(git_diff))
         .route("/git/commit", post(git_commit))
-        .route("/sessions", get(sessions_list).put(sessions_upsert).delete(sessions_clear))
+        // Transcripts carry attached images as data: URLs, so they blow past
+        // axum's 2 MB default — which resets the upload mid-flight and shows
+        // up in the UI as a bare "Failed to fetch".
+        .route(
+            "/sessions",
+            get(sessions_list)
+                .put(sessions_upsert)
+                .delete(sessions_clear)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT)),
+        )
         .route("/sessions/archived", get(sessions_archived))
         .route("/sessions/{id}", delete(sessions_delete))
         .route("/sessions/{id}/rename", post(sessions_rename))
         .route("/sessions/{id}/archive", post(sessions_archive))
         .route("/sessions/{id}/unarchive", post(sessions_unarchive))
-        .route("/agent/run", post(agent_run))
+        .route("/agent/run", post(agent_run).layer(DefaultBodyLimit::max(BODY_LIMIT)))
         .route("/agent/revert", post(agent_revert))
         .route("/agent/cancel", post(agent_cancel))
         .route("/agent/permission", post(agent_permission))
