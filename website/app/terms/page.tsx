@@ -11,21 +11,30 @@ export default function Terms() {
   return (
     <Legal title="Terms & Legal" updated="24 August 2026">
       <p>
-        Loom is free, MIT-licensed software, still in early development. These
+        Loom is source-available software, free for individuals and still in early
+        development. These
         terms cover the software and this website; they are deliberately short,
         because there is not much to claim.
       </p>
 
       <h2>Licence</h2>
       <p>
-        The source is published under the MIT License at{" "}
+        The source is published at{" "}
         <a href={REPO} target="_blank" rel="noreferrer">
           github.com/sammyZi/loom
-        </a>
-        . You may use, copy, modify and distribute it under those terms,
-        including commercially, as long as the copyright notice and licence
-        text travel with it. The licence text in the repository is what
-        governs; nothing here overrides it.
+        </a>{" "}
+        under the PolyForm Noncommercial License 1.0.0. Use it, modify it, fork
+        it and share it freely for anything that is not commercial — your own
+        work, side projects, study, teaching, or a registered charity. Using it
+        to produce work a company or client pays for is commercial use and needs
+        a separate licence; email{" "}
+        <a href="mailto:bhingesamarth@gmail.com">bhingesamarth@gmail.com</a>.
+      </p>
+      <p>
+        Source-available is not the same as open source: the noncommercial
+        restriction is a real one. The licence text in the repository is what
+        governs; nothing on this page overrides it. Releases up to v0.1.0 went
+        out under the MIT License and those grants stand for those versions.
       </p>
 
       <h2>Beta software</h2>

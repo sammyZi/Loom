@@ -235,3 +235,49 @@ Two files do not run and are excluded above: `lib/log.test.mjs` and
 that nothing generates. `store.test.mjs` is stale as well as unbuilt — it imports
 `loadSessions`, which was renamed to `loadAllSessions`. They need converting to
 the mirror convention (or a build step) before they guard anything.
+
+---
+
+## License
+
+**Free for individuals. Organizations need a commercial license.**
+
+Loom is source-available under the
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0),
+which grants everything you would expect — use, modify, distribute, fork — for
+any purpose that is not commercial.
+
+| You are | What you get |
+| ------- | ------------ |
+| An individual using it on your own work, side projects, or learning | Free, no permission needed, no strings |
+| A student, researcher, or teacher using it for study or coursework | Free |
+| A registered charity or public-benefit body | Free |
+| A company, agency, or contractor using it for paid work | **Commercial license required** |
+| Anyone reselling it, hosting it as a service, or shipping it inside a product | **Commercial license required** |
+
+The line is the *purpose*, not the job title. Reading this repository, learning
+from it, or hacking on it at a company hurts nobody and is fine. Using it to
+produce work your employer or client bills for is commercial use, and needs a
+license.
+
+Contributions stay welcome under the same terms, and contributing does not sign
+your work away for commercial resale by anyone else.
+
+### Getting a commercial license
+
+Email **bhingesamarth@gmail.com** with your company name and rough team size.
+Pricing is deliberately boring and per-seat; small teams should expect it to be
+cheaper than the afternoon spent debating it.
+
+### History
+
+Releases up to and including `v0.1.0` were published under the MIT License, and
+that grant is irrevocable: anyone who obtained those versions keeps MIT rights
+to them forever. The terms above apply to everything released after that point.
+
+### The license text
+
+The full text is in [LICENSE.md](LICENSE.md), copied verbatim from the
+[PolyForm project](https://polyformproject.org/licenses/noncommercial/1.0.0).
+Where this summary and that text disagree, the text wins — the table above is a
+reading aid, not the license.

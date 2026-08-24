@@ -131,7 +131,7 @@ const faqs = [
   },
   {
     q: "Is it open source?",
-    a: "MIT licensed, source on GitHub. If you would rather not trust a binary, clone it and run cargo build -p cli yourself.",
+    a: "Source-available, not open source. Free for individuals under the PolyForm Noncommercial License — read it, fork it, build it yourself. Companies using it for paid work need a commercial license.",
   },
 ];
 
@@ -253,7 +253,7 @@ export default function Home() {
             className="rise mt-5 text-caption uppercase text-smoke"
             style={{ "--d": "0.3s" } as React.CSSProperties}
           >
-            one binary · windows · MIT licensed
+            one binary · windows · free for individuals
           </p>
 
           {/* product shot */}
@@ -619,7 +619,7 @@ export default function Home() {
           </div>
 
           <p className="mt-8 text-caption uppercase text-smoke">
-            no public download yet · MIT licensed · source on GitHub
+            no public download yet · free for individuals · source on GitHub
           </p>
         </section>
       </main>
