@@ -171,7 +171,7 @@ details[open] .chev {
   }
 }
 
-/* motion — scroll reveal rides the native view timeline, no JS, no observer */
+/* motion — hero stagger on load, scroll reveal driven by IntersectionObserver */
 @keyframes rise {
   from {
     opacity: 0;
@@ -187,13 +187,19 @@ details[open] .chev {
     animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
     animation-delay: var(--d, 0s);
   }
-  @supports (animation-timeline: view()) {
-    .reveal {
-      animation: rise ease-out both;
-      animation-timeline: view();
-      animation-range: entry 8% cover 32%;
-    }
-  }
+}
+
+/* the start state only exists once the observer is mounted */
+.js-reveal .reveal {
+  opacity: 0;
+  transform: translateY(28px);
+  transition:
+    opacity 0.65s ease-out,
+    transform 0.65s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.js-reveal .reveal.in {
+  opacity: 1;
+  transform: none;
 }
 
 .arrow {

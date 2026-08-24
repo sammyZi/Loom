@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Newsreader, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { Reveal } from "@/components/reveal";
 
 const newsreader = Newsreader({
   subsets: ["latin"],
@@ -29,6 +30,7 @@ export default function RootLayout({
     <html lang="en" className={`${newsreader.variable} ${jetbrains.variable}`}>
       <body className="bg-parchment font-mono text-body text-off-black antialiased">
         {children}
+        <Reveal />
       </body>
     </html>
   );
