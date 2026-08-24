@@ -5,7 +5,7 @@ import { BrowserPanel } from "@/components/BrowserPanel";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
-import { IconClose } from "@/components/Icons";
+import { IconClose, IconPlay, IconTrash } from "@/components/Icons";
 import { SettingsModal } from "@/components/SettingsModal";
 import { Sidebar, buildGroups, normPath } from "@/components/Sidebar";
 import { TerminalPanel } from "@/components/TerminalPanel";
@@ -127,7 +127,6 @@ export default function Page() {
   // /ws/shell chunks with id "agent".
   const [agentLog, setAgentLog] = useState("");
   const [maxed, setMaxed] = useState(false);
-  const [copied, setCopied] = useState(false);
   // Approximate context-window usage for the run in progress (and its last
   // known value afterwards), driven by backend `context` events.
   // Open approval request from manual mode's shell gate.
@@ -276,6 +275,25 @@ export default function Page() {
     void run(next.text, next.meta);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, queue]);
+
+  /** Drop one queued message. */
+  function dequeue(i: number) {
+    setQueue((prev) => prev.filter((_, j) => j !== i));
+  }
+
+  /**
+   * Send a queued message now instead of waiting for the run in flight.
+   * Moving it to the front and stopping the run lets the existing drain
+   * effect fire it the moment `busy` clears — calling run() here would race
+   * that flag and just re-queue the message.
+   */
+  function sendNow(i: number) {
+    setQueue((prev) => {
+      const item = prev[i];
+      return item ? [item, ...prev.filter((_, j) => j !== i)] : prev;
+    });
+    void stopRun();
+  }
 
   const refresh = useCallback(async () => {
     const ws = await api.workspace();
@@ -654,16 +672,6 @@ export default function Page() {
     }
   }
 
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  }
-
   function toggleSide() {
     localStorage.setItem(SIDE_KEY, sideOpen ? "0" : "1");
     setSideOpen(!sideOpen);
@@ -765,11 +773,9 @@ export default function Page() {
             project={project}
             sideOpen={sideOpen}
             panel={panel}
-            copied={copied}
             live={connected}
             onShowSide={toggleSide}
             onPanel={setPanel}
-            onCopyLink={copyLink}
           />
 
           <Feed
@@ -789,17 +795,47 @@ export default function Page() {
             <ContextBar project={project} git={git} stat={stat} onCommit={commit} />
             {queue.length > 0 && (
               <div className="queue-strip">
+                <div className="queue-head">
+                  <span className="queue-count">
+                    {queue.length} queued
+                    {busy && <span className="queue-hint"> · sends when this run ends</span>}
+                  </span>
+                  <button
+                    className="queue-clear"
+                    title="Clear the queue"
+                    onClick={() => setQueue([])}
+                  >
+                    <IconTrash />
+                    Clear
+                  </button>
+                </div>
                 {queue.map((q, i) => (
-                  <span key={i} className="queue-chip">
-                    <span className="queue-chip-text">{q.text}</span>
+                  <div key={i} className={`queue-chip${i === 0 ? " is-next" : ""}`}>
+                    <span className="queue-pos">{i === 0 ? "next" : i + 1}</span>
+                    <span className="queue-chip-text" title={q.text}>
+                      {q.text}
+                    </span>
+                    {q.meta.attachments.length > 0 && (
+                      <span className="queue-attach">
+                        {q.meta.attachments.length} file
+                        {q.meta.attachments.length > 1 ? "s" : ""}
+                      </span>
+                    )}
                     <button
-                      className="queue-chip-x"
+                      className="queue-chip-btn"
+                      title="Send now — stops the current run"
+                      onClick={() => sendNow(i)}
+                    >
+                      <IconPlay />
+                    </button>
+                    <button
+                      className="queue-chip-btn"
                       title="Remove from queue"
-                      onClick={() => setQueue((prev) => prev.filter((_, j) => j !== i))}
+                      onClick={() => dequeue(i)}
                     >
                       <IconClose />
                     </button>
-                  </span>
+                  </div>
                 ))}
               </div>
             )}

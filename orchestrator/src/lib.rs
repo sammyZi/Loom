@@ -231,11 +231,15 @@ pub async fn run_task(
             None,
         )
         .await?;
-        last = review.clone();
         if review.to_ascii_uppercase().contains("APPROVED") {
-            let _ = env.events.send(AgentEvent::Done { summary: review });
+            // The reviewer is internal QA. Its verdict, the exit codes it
+            // quotes and its file-by-file notes answer nothing the user asked
+            // for, so a passing review ends the run silently and the coder's
+            // summary — the one that describes the change — is what ships.
+            let _ = env.events.send(AgentEvent::Done { summary: last.clone() });
             return Ok(last);
         }
+        last = review.clone();
         // A REVISE round that changed nothing will not change anything next
         // time either — the loop was re-running the whole planner/coder pass
         // to reach the same place. Stop and say so rather than pay for it

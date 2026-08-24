@@ -147,25 +147,47 @@ function voicesReady(synth: SpeechSynthesis): Promise<SpeechSynthesisVoice[]> {
 }
 
 /**
- * Prefer a natural-sounding voice. Windows ships the flat legacy SAPI voices
- * (David/Zira/Mark/Sam) alongside far better "Online (Natural)" ones; browsers
- * also expose Google voices. Falls back to the default only when nothing
- * better is installed.
+ * Known English voice names by gender. The Web Speech API exposes no gender
+ * field at all — only a name, a lang and a localService flag — so matching the
+ * shipped voice names is the only way to ask for a female voice. Anything not
+ * listed is treated as unknown rather than guessed at, and still beats a name
+ * known to be male.
+ */
+const FEMALE =
+  /(female|aria|jenny|michelle|ana|sonia|libby|natasha|clara|emily|zira|hazel|eva|samantha|victoria|karen|moira|tessa|fiona|allison|ava|susan|zoe|serena|catherine|linda|heather|amber|ashley|cora|elizabeth|monica|nova|joanna|salli|kendra|kimberly|ivy)/;
+const MALE =
+  /(male|david|mark|guy|ryan|george|christopher|eric|brian|daniel|alex|fred|tom|oliver|william|liam|steffan|roger|sam|arthur|thomas|gordon|james|jason|nathan|aaron|matthew|joey|justin|kevin)/;
+
+/**
+ * Prefer a natural-sounding female voice. Windows ships the flat legacy SAPI
+ * voices (David/Zira/Mark/Sam) alongside far better "Online (Natural)" ones;
+ * browsers also expose Google voices. Gender is the first sort key and quality
+ * the second, so a female voice wins even when a male one sounds slicker —
+ * falling back through unknown to male only when nothing else is installed.
  */
 function humanVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
   const en = voices.filter((v) => v.lang.toLowerCase().startsWith("en"));
   if (!en.length) return null;
-  const rank = (v: SpeechSynthesisVoice) => {
-    const n = v.name.toLowerCase();
+
+  // 0 female, 1 unknown, 2 male — "Google UK English Female" and the like
+  // carry the word outright, which is why `female`/`male` are in the lists.
+  const gender = (n: string) => (FEMALE.test(n) ? 0 : MALE.test(n) ? 2 : 1);
+
+  // Within a gender, how good the engine sounds.
+  const quality = (v: SpeechSynthesisVoice, n: string) => {
     if (n.includes("natural")) return 0;
     if (n.includes("google")) return 1;
-    if (n.includes("aria") || n.includes("jenny") || n.includes("guy")) return 2;
     // The classic flat SAPI voices: always worse than an untested unknown.
-    if (/\b(david|zira|mark|sam)\b/.test(n)) return 5;
-    if (v.localService) return 3;
-    return 4;
+    if (/(david|zira|mark|sam)/.test(n)) return 4;
+    if (v.localService) return 2;
+    return 3;
   };
-  return [...en].sort((a, b) => rank(a) - rank(b))[0] ?? null;
+
+  const score = (v: SpeechSynthesisVoice) => {
+    const n = v.name.toLowerCase();
+    return gender(n) * 10 + quality(v, n);
+  };
+  return [...en].sort((a, b) => score(a) - score(b))[0] ?? null;
 }
 
 /** Markdown flattened to something worth hearing. */

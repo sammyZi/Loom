@@ -93,7 +93,20 @@ impl Db {
             std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
         let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+        // WAL alone left a 4 MB log next to a 700 KB database: the log grows to
+        // its high-water mark and stays there, because a checkpoint recycles
+        // the file rather than shrinking it unless a size limit says otherwise.
+        // `synchronous = NORMAL` is the documented pairing for WAL — still
+        // corruption-safe, but only checkpoints pay for an fsync instead of
+        // every transcript write. busy_timeout keeps a second connection
+        // waiting its turn rather than erroring out.
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA journal_size_limit = 4194304;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
+        )?;
         conn.execute_batch(SCHEMA).context("create schema")?;
         migrate(&conn);
         Ok(Self {

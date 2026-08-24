@@ -1,10 +1,8 @@
 "use client";
 
 import {
-  IconCheck,
   IconDiff,
   IconGlobe,
-  IconLink,
   IconPanel,
   IconTerminal,
 } from "@/components/Icons";
@@ -16,22 +14,18 @@ export function TopBar({
   project,
   sideOpen,
   panel,
-  copied,
   live = true,
   onShowSide,
   onPanel,
-  onCopyLink,
 }: {
   title: string;
   project: string;
   sideOpen: boolean;
   panel: Panel;
-  copied: boolean;
-  /** Backend socket connectivity; a red dot warns that the feed is stale. */
+  /** Backend socket connectivity. Only surfaced when it is broken. */
   live?: boolean;
   onShowSide: () => void;
   onPanel: (p: Panel) => void;
-  onCopyLink: () => void;
 }) {
   return (
     <div className="topbar">
@@ -42,16 +36,14 @@ export function TopBar({
       )}
       <span className="topbar-title">{title}</span>
       <span className="chip">{project}</span>
-      <span
-        className={`chip ${live ? "chip-live" : "chip-dead"}`}
-        title={live ? "Connected to the Loom backend" : "Reconnecting to the backend…"}
-      >
-        {live ? "connected" : "reconnecting"}
-      </span>
+      {/* Connected is the normal state and needs no badge; only the broken
+          one is worth a word, so the bar stays quiet until something is. */}
+      {!live && (
+        <span className="chip chip-dead" title="Reconnecting to the backend…">
+          reconnecting
+        </span>
+      )}
       <span className="spacer" />
-      <button className="icon-btn" title="Copy link" onClick={onCopyLink}>
-        {copied ? <IconCheck /> : <IconLink />}
-      </button>
       <button
         className={`icon-btn ${panel === "diff" ? "on" : ""}`}
         title={panel === "diff" ? "Hide changes" : "Show changes"}

@@ -388,9 +388,6 @@ body.dragging-col {
   padding: 3px 9px;
   border-radius: 6px;
 }
-.chip-live {
-  color: #3fb96f;
-}
 .chip-dead {
   color: #e5484d;
   animation: pulse 1.2s ease-in-out infinite;
@@ -1350,8 +1347,39 @@ body.dragging-col {
   margin: 0 auto 8px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
+.queue-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 2px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.queue-hint {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.queue-clear {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--muted);
+  font: inherit;
+  text-transform: inherit;
+  cursor: default;
+}
+.queue-clear:hover { background: var(--bg-2); color: var(--text); }
+.queue-clear svg { width: 12px; height: 12px; }
+
 .queue-chip {
   display: flex;
   align-items: center;
@@ -1359,28 +1387,60 @@ body.dragging-col {
   background: var(--panel);
   border: 1px solid var(--border-2);
   border-radius: 8px;
-  padding: 6px 8px 6px 12px;
+  padding: 6px 6px 6px 8px;
   font-size: 13px;
   color: var(--text-2);
+  animation: queue-in 0.18s ease-out;
+}
+@keyframes queue-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+/* The one that goes out next is worth telling apart at a glance. */
+.queue-chip.is-next {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.queue-pos {
+  flex-shrink: 0;
+  min-width: 34px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.queue-chip.is-next .queue-pos {
+  background: var(--accent-soft);
+  color: var(--accent-hi);
 }
 .queue-chip-text {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.queue-chip-x {
+.queue-attach {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.queue-chip-btn {
   flex-shrink: 0;
   display: flex;
   background: none;
   border: 0;
   color: var(--muted);
   border-radius: 6px;
-  padding: 3px;
+  padding: 4px;
   cursor: default;
 }
-.queue-chip-x:hover { background: var(--bg-2); color: var(--text); }
-.queue-chip-x svg { width: 13px; height: 13px; }
+.queue-chip-btn:hover { background: var(--bg-2); color: var(--text); }
+.queue-chip-btn svg { width: 13px; height: 13px; }
 
 /* ---------- terminal prompt row ---------- */
 .term-in { border-top: 1px solid var(--border); background: var(--bg); }
