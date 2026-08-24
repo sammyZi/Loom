@@ -20,3 +20,6 @@ tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 viewer = { path = "../viewer" }
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

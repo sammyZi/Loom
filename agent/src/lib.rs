@@ -2,6 +2,7 @@ pub mod agents;
 pub mod project;
 pub mod skills;
 pub mod provider;
+pub mod secrets;
 pub mod settings;
 mod compact;
 mod context;
