@@ -180,6 +180,29 @@ function Swash() {
   );
 }
 
+/** A connector: the static line, plus a packet that travels it. */
+function Wire({
+  d,
+  stroke,
+  delay,
+}: {
+  d: string;
+  stroke: string;
+  delay: number;
+}) {
+  return (
+    <g fill="none" stroke={stroke}>
+      <path d={d} opacity="0.3" />
+      <path
+        d={d}
+        pathLength={100}
+        className="flow"
+        style={{ "--d": `${delay}s` } as React.CSSProperties}
+      />
+    </g>
+  );
+}
+
 function Node({
   icon,
   label,
@@ -321,12 +344,12 @@ export default function Home() {
                 <stop offset="0" stopColor="#ff9473" />
                 <stop offset="1" stopColor="#a0b5eb" />
               </linearGradient>
-              {[20, 100, 180].map((y) => (
-                <path
+              {[20, 100, 180].map((y, i) => (
+                <Wire
                   key={y}
                   d={`M0 ${y} C60 ${y} 60 100 120 100`}
-                  fill="none"
                   stroke="url(#flow-in)"
+                  delay={i * 0.55}
                 />
               ))}
             </svg>
@@ -338,7 +361,7 @@ export default function Home() {
             />
 
             <div className="relative mx-auto">
-              <Wash className="inset-0 m-auto h-40 w-40 bg-mint opacity-70" />
+              <Wash className="breathe inset-0 m-auto h-40 w-40 bg-mint opacity-70" />
               <div className="flex h-36 w-36 flex-col items-center justify-center gap-2 rounded-pill border border-ash bg-parchment text-center sm:h-40 sm:w-40">
                 <Logo size={26} />
                 <span className="text-caption uppercase">Loom agent</span>
@@ -363,12 +386,12 @@ export default function Home() {
                 <stop offset="0" stopColor="#a0b5eb" />
                 <stop offset="1" stopColor="#a7fccd" />
               </linearGradient>
-              {[20, 100, 180].map((y) => (
-                <path
+              {[20, 100, 180].map((y, i) => (
+                <Wire
                   key={y}
                   d={`M0 100 C60 100 60 ${y} 120 ${y}`}
-                  fill="none"
                   stroke="url(#flow-out)"
+                  delay={1.3 + i * 0.55}
                 />
               ))}
             </svg>

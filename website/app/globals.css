@@ -257,3 +257,34 @@ button:hover > .arrow {
     clip-path: inset(0 0 0 0);
   }
 }
+
+/* pipeline — packets travelling the connectors, wash breathing behind the agent */
+@media (prefers-reduced-motion: no-preference) {
+  .flow {
+    stroke-dasharray: 14 86;
+    animation: flow 2.6s linear infinite;
+    animation-delay: var(--d, 0s);
+  }
+  .breathe {
+    animation: breathe 5s ease-in-out infinite;
+  }
+}
+@keyframes flow {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.85;
+  }
+}
