@@ -1166,11 +1166,22 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
           {/* Main Input Card */}
           <div
             onMouseDown={(e) => {
-              const isTextarea = e.target === textareaRef.current;
-              if (expanded && !isTextarea && !isRecording) {
-                e.preventDefault();
-                textareaRef.current?.focus();
+              if (!expanded || isRecording) return;
+              if (e.target === textareaRef.current) return;
+              // Clicking the card's empty space drops the caret in the
+              // composer. Clicking a control that lives inside the card — the
+              // model picker's search box above all — must keep its own focus,
+              // or the preventDefault() below sends the typing here instead.
+              const el = e.target as HTMLElement | null;
+              if (
+                el?.closest(
+                  "input, textarea, select, [contenteditable=\"true\"], [role=\"dialog\"], [role=\"listbox\"], [role=\"menu\"], [role=\"combobox\"]",
+                )
+              ) {
+                return;
               }
+              e.preventDefault();
+              textareaRef.current?.focus();
             }}
             style={{
               borderRadius: 24,

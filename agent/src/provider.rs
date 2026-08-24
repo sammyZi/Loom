@@ -565,18 +565,32 @@ pub async fn groups_json_live(settings: &Settings) -> Value {
     let Some(groups) = base.get_mut("groups").and_then(|g| g.as_array_mut()) else {
         return base;
     };
-    for group in groups.iter_mut() {
-        let Some(id) = group.get("id").and_then(|v| v.as_str()).map(String::from) else {
-            continue;
-        };
-        let Some(def) = provider_def(&id) else { continue };
-        // Only bother for providers that are actually usable; an unconfigured
-        // one would just fail the request and slow the response down.
-        if !def.key_optional && settings.api_key_for(def.id, def.env_keys).is_none() {
-            continue;
-        }
-        if let Some(models) = remote_models(def, settings).await {
-            group["models"] = Value::Array(models);
+
+    // Only bother for providers that are actually usable; an unconfigured one
+    // would just fail the request and slow the response down.
+    let wanted: Vec<(usize, &'static ProviderDef)> = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(i, group)| {
+            let def = provider_def(group.get("id")?.as_str()?)?;
+            let usable = def.key_optional || settings.api_key_for(def.id, def.env_keys).is_some();
+            usable.then_some((i, def))
+        })
+        .collect();
+
+    // Concurrently: with several keys configured the wait is the slowest
+    // provider, not the sum of them, which is the difference between the model
+    // picker feeling instant and feeling broken.
+    let fetched = futures_util::future::join_all(
+        wanted
+            .into_iter()
+            .map(|(i, def)| async move { (i, remote_models(def, settings).await) }),
+    )
+    .await;
+
+    for (i, models) in fetched {
+        if let Some(models) = models {
+            groups[i]["models"] = Value::Array(models);
         }
     }
     base

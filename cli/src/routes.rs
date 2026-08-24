@@ -400,8 +400,12 @@ async fn providers_post(
             return err(StatusCode::INTERNAL_SERVER_ERROR, "could not save settings");
         }
     }
+    // Live list, not the built-in catalog: the key that was just saved is what
+    // makes the provider's real models fetchable, and the UI renders this
+    // response directly — returning the static list is what used to leave the
+    // picker empty until the app was restarted.
     let settings = st.snapshot_settings();
-    Json(agent::model_groups(&settings)).into_response()
+    Json(agent::model_groups_live(&settings).await).into_response()
 }
 
 #[derive(Deserialize)]
