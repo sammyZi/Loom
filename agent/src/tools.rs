@@ -73,6 +73,9 @@ pub struct ToolCtx {
     /// before attempting any edit — so past this budget whole-file reads are
     /// refused and it has to search or ask for a range.
     pub read_budget: Arc<std::sync::atomic::AtomicUsize>,
+    /// Content each written path had the first time this task touched it —
+    /// `None` means it did not exist yet. Backs "undo this message".
+    pub before: Arc<std::sync::Mutex<HashMap<String, Option<String>>>>,
 }
 
 /// Roughly 15k tokens of source. Enough to read a handful of files whole, not
@@ -96,6 +99,17 @@ impl ToolCtx {
         }
         if let Ok(mut r) = self.reads.lock() {
             r.remove(path);
+        }
+    }
+
+    /// Record what a path held right before its first write this task, so a
+    /// later "undo this message" has something to restore. Only the first
+    /// call for a given path counts — a second edit to the same file must
+    /// still revert all the way back to how the task found it, not to the
+    /// intermediate state the first edit left behind.
+    pub fn note_before(&self, path: &str, existing: Option<&str>) {
+        if let Ok(mut b) = self.before.lock() {
+            b.entry(path.to_string()).or_insert_with(|| existing.map(str::to_string));
         }
     }
 
@@ -1006,7 +1020,9 @@ impl Tool for WriteFile {
             anyhow::bail!("path required");
         }
         let content = input["content"].as_str().unwrap_or("");
-        let existed = viewer::read_file(&ctx.ws, path).is_ok();
+        let before = viewer::read_file(&ctx.ws, path).ok();
+        ctx.note_before(path, before.as_deref());
+        let existed = before.is_some();
         viewer::write_file(&ctx.ws, path, content)?;
         ctx.note_write(path);
         Ok(format!(
@@ -1165,6 +1181,7 @@ impl Tool for EditFile {
         let old = input["old_text"].as_str().unwrap_or("");
         let new = input["new_text"].as_str().unwrap_or("");
         let existing = viewer::read_file(&ctx.ws, path).ok();
+        ctx.note_before(path, existing.as_deref());
         if old.is_empty() {
             // Empty old_text means "create". Overwriting a real file wholesale
             // used to pass silently — silent data loss driven by model drift.
@@ -1203,6 +1220,12 @@ impl Tool for EditFile {
     }
 }
 
+/// Foreground cap for the agent's own commands. Was 120s and killed ordinary
+/// `npm install` / first-time dependency fetches outright, well short of done.
+/// A terminal a person is watching has no such cap (see routes.rs); this one
+/// exists only so a truly hung foreground call cannot block the run forever.
+const FOREGROUND_TIMEOUT: Duration = Duration::from_secs(600);
+
 #[async_trait]
 impl Tool for RunCommand {
     fn name(&self) -> &'static str {
@@ -1211,9 +1234,10 @@ impl Tool for RunCommand {
     fn description(&self) -> &'static str {
         "Run a program in the workspace sandbox. Output streams live into the terminal panel's \
          Agent tab while it runs. Give program and args separately, not a shell line. Foreground \
-         calls wait for completion (120s cap, process tree killed on return) and suit installs, \
-         builds, tests and checks. For a dev server or watcher set background:true: the call \
-         returns immediately and the process keeps running until stopped from the terminal panel."
+         calls wait for completion (10 minute cap, process tree killed on return) and suit \
+         installs, builds, tests and checks. For a dev server or watcher set background:true: the \
+         call returns immediately and the process keeps running until stopped from the terminal \
+         panel."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -1248,16 +1272,18 @@ impl Tool for RunCommand {
         let background = input["background"].as_bool().unwrap_or(false);
 
         // A server started in the foreground is doomed: run_foreground caps at
-        // 120s and kills the tree on return, so `npm run dev` came up and died
-        // the moment the tool replied. Asking for background:true in the prompt
-        // was not enough, so the wrong call is refused with the fix in hand.
+        // FOREGROUND_TIMEOUT and kills the tree on return, so `npm run dev` came
+        // up and died the moment the tool replied. Asking for background:true in
+        // the prompt was not enough, so the wrong call is refused with the fix
+        // in hand.
         if !background && looks_long_running(&program, &args) {
             return Ok(format!(
                 "refused: `{program} {}` looks like a server or watcher, and a foreground run is \
-                 killed when this call returns (120s cap). Call run_command again with \
+                 killed when this call returns ({}s cap). Call run_command again with \
                  background:true — it will keep running, get its own terminal tab, and print the \
                  port it bound to.",
-                args.join(" ")
+                args.join(" "),
+                FOREGROUND_TIMEOUT.as_secs(),
             ));
         }
 
@@ -1555,7 +1581,7 @@ impl RunCommand {
         });
         let out = ctx
             .sandbox
-            .run_streaming(&ctx.ws, program, args, Duration::from_secs(120), cancel, Some(tx), None)
+            .run_streaming(&ctx.ws, program, args, FOREGROUND_TIMEOUT, cancel, Some(tx), None)
             .await;
         drop_forwarder(forwarder).await;
         match out {
@@ -1618,7 +1644,7 @@ impl RunCommand {
         let program_owned = program.to_string();
         let args_owned = args.to_vec();
         // Background jobs outlive the HTTP call by design, so they get a long
-        // deadline instead of the foreground 120s.
+        // deadline instead of the foreground cap.
         const BG_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
         tokio::spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -1939,6 +1965,7 @@ mod tool_tests {
             reads: Default::default(),
             writes: Default::default(),
             read_budget: Default::default(),
+            before: Default::default(),
         }
     }
 
@@ -2043,6 +2070,42 @@ mod tool_tests {
 
         let after = ReadFile.call(&ctx, arg, &cancel).await.unwrap();
         assert!(after.contains("two"), "post-write read must return new content: {after}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Backs "undo this message": the snapshot must hold what a file had
+    /// *before this task*, not before its most recent edit — a second write
+    /// to the same path must not overwrite the recorded baseline.
+    #[tokio::test]
+    async fn before_snapshot_keeps_the_original_not_the_intermediate_state() {
+        let root = std::env::temp_dir().join("ide-ai-before-snapshot-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("b.txt"), "original\n").unwrap();
+        let ctx = test_ctx(&root);
+        let cancel = CancellationToken::new();
+
+        WriteFile
+            .call(&ctx, json!({ "path": "b.txt", "content": "first edit\n" }), &cancel)
+            .await
+            .unwrap();
+        WriteFile
+            .call(&ctx, json!({ "path": "b.txt", "content": "second edit\n" }), &cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ctx.before.lock().unwrap().get("b.txt"),
+            Some(&Some("original\n".to_string())),
+        );
+
+        // A brand new file: reverting it means deleting it, so `None` records that.
+        WriteFile
+            .call(&ctx, json!({ "path": "new.txt", "content": "hi\n" }), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(ctx.before.lock().unwrap().get("new.txt"), Some(&None));
 
         std::fs::remove_dir_all(&root).ok();
     }

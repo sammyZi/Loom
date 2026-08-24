@@ -119,6 +119,26 @@ The composer's Auto / Plan / Manual / Approve modes are presets over this.
 
 ---
 
+## Code graph
+
+[graphify](https://github.com/Graphify-Labs/graphify) turns the repo into a
+knowledge graph the agent can query instead of reading files to find out how
+things connect. Extraction is tree-sitter, not an LLM, and every edge is tagged
+`EXTRACTED` or `INFERRED`.
+
+```bash
+pip install graphifyy
+graphify extract . --code-only --cargo   # builds graphify-out/ (no API key)
+graphify update .                        # incremental refresh
+```
+
+`.opencode/skills/graphify/SKILL.md` teaches the agent when to reach for it —
+orientation, "who calls this", blast radius before a refactor — and which
+commands to run (`query`, `path`, `explain`, `affected`, `god-nodes`).
+`graphify-out/` is gitignored; rebuild it per clone.
+
+---
+
 ## Skills
 
 A skill is reusable instructions in a `SKILL.md` with YAML frontmatter. Loom
@@ -184,9 +204,12 @@ Set `RUST_LOG=info` to see cache hit rates and per-read cache decisions.
 
 ## Sandbox
 
-Commands run in a Job Object with a restricted token, a process and memory cap,
-and proxy env vars pointed at a dead port so a build cannot phone home. The whole
-process tree is killed on timeout, on cancel, and when its terminal tab closes.
+Commands run in a Job Object with a restricted token and a process and memory
+cap. Network access is real — installs, `git clone`, and package managers work
+like a normal shell. The whole process tree is killed on timeout, on cancel,
+and when its terminal tab closes; a detached process that outlives its own
+command on purpose (an editor opened with `code .` or `kiro .`) is the one
+thing spared.
 
 Scratch space lives in the system temp directory, keyed by workspace — **not** in
 your project, because a stray folder there breaks tools that require an empty

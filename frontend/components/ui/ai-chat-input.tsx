@@ -1023,13 +1023,14 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       fileInputRef.current?.click();
     };
 
-    const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith("image/"));
-      e.target.value = "";
-
+    // Shared by the file picker and paste-an-image (Ctrl+V): both just hand
+    // over a list of image files and want the same room check, expand, and
+    // thumbnail sizing.
+    const addFiles = (files: File[]) => {
       if (files.length === 0) return;
       const room = Math.max(0, maxAttachments - attachments.length);
       const accepted = files.slice(0, room);
+      if (accepted.length === 0) return;
 
       if (!expanded) { setIsSmoothResize(false); setExpanded(true); }
       else { setIsSmoothResize(true); }
@@ -1041,6 +1042,25 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
         img.onerror = () => addAttachment(file, url, 800, 600);
         img.src = url;
       }
+    };
+
+    const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith("image/"));
+      e.target.value = "";
+      addFiles(files);
+    };
+
+    // Ctrl+V with an image on the clipboard (a screenshot, a copied image)
+    // attaches it the same way the file picker does, instead of the browser's
+    // default of doing nothing for image clipboard items in a plain textarea.
+    const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = Array.from(e.clipboardData?.items ?? [])
+        .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+        .map((it) => it.getAsFile())
+        .filter((f): f is File => f !== null);
+      if (files.length === 0) return; // plain text paste: let the browser handle it
+      e.preventDefault();
+      addFiles(files);
     };
 
     const addAttachment = (file: File, url: string, width: number, height: number) => {
@@ -1175,6 +1195,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
               value={value}
               onChange={(e) => handleValueChange(e.target.value)}
               onScroll={updateFades}
+              onPaste={handlePaste}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();

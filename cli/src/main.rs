@@ -1,5 +1,6 @@
-// Console only in debug builds; release runs as a windowed app.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// No console window, ever — this is a desktop app. Launched from a terminal it
+// still inherits that terminal's stdout, so `cargo run` keeps its logs.
+#![windows_subsystem = "windows"]
 
 mod pick;
 mod db;

@@ -61,22 +61,6 @@ pub fn native() -> Arc<dyn Sandbox> {
     }
 }
 
-pub fn deny_network_env() -> Vec<(String, String)> {
-    [
-        ("HTTPS_PROXY", "http://127.0.0.1:9"),
-        ("HTTP_PROXY", "http://127.0.0.1:9"),
-        ("ALL_PROXY", "http://127.0.0.1:9"),
-        ("NO_PROXY", "localhost,127.0.0.1,::1"),
-        ("GIT_HTTPS_PROXY", "http://127.0.0.1:9"),
-        ("GIT_HTTP_PROXY", "http://127.0.0.1:9"),
-        ("GIT_SSH_COMMAND", "cmd /c exit 1"),
-        ("CARGO_NET_OFFLINE", "true"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
-}
-
 pub fn passthrough_env() -> Vec<(String, String)> {
     const KEEP: &[&str] = &[
         "PATH",
@@ -109,13 +93,6 @@ pub fn passthrough_env() -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn network_env_points_at_discard() {
-        let env = super::deny_network_env();
-        let https = env.iter().find(|(k, _)| k == "HTTPS_PROXY").unwrap();
-        assert_eq!(https.1, "http://127.0.0.1:9");
-    }
-
     /// A slow command that emits lines as it goes. Ping used to be the fixture,
     /// but under the restricted token some machines cannot even resolve a
     /// numeric address, so PowerShell printing in a loop keeps this portable.

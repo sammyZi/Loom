@@ -5,11 +5,12 @@ import { BrowserPanel } from "@/components/BrowserPanel";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
 import { Feed } from "@/components/Feed";
+import { IconClose } from "@/components/Icons";
 import { SettingsModal } from "@/components/SettingsModal";
 import { Sidebar, buildGroups, normPath } from "@/components/Sidebar";
 import { TerminalPanel } from "@/components/TerminalPanel";
 import { TopBar, type Panel } from "@/components/TopBar";
-import { Welcome, rememberRecent, type Recent } from "@/components/Welcome";
+import { Welcome, pruneRecent, readRecent, rememberRecent, type Recent } from "@/components/Welcome";
 import {
   api,
   connectWs,
@@ -44,13 +45,21 @@ const NEW_CHAT_TITLE = "New chat";
 
 const MODEL_KEY = "ide-ai-model";
 const SIDE_KEY = "ide-ai-side";
-const RECENT_KEY = "ide-ai-recent";
 const SIDE_W_KEY = "ide-ai-side-w";
 const PANEL_W_KEY = "ide-ai-panel-w";
 
 /** Panel sizes with sane limits: [default, min, max]. */
 const SIDE_W = { def: 260, min: 200, max: 460 };
 const PANEL_W = { def: 460, min: 300, max: 900 };
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
 
 export default function Page() {
   const [folder, setFolder] = useState<string | null>(null);
@@ -68,6 +77,9 @@ export default function Page() {
   const [promptShown, setPromptShown] = useState("");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+  // Messages sent while a run is in flight. Queued, not dropped — the old
+  // behaviour silently threw away anything typed while busy.
+  const [queue, setQueue] = useState<{ text: string; meta: SubmitMeta }[]>([]);
   const [phase, setPhase] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [tokens, setTokens] = useState(0);
@@ -191,11 +203,9 @@ export default function Page() {
   }
 
   function loadRecent() {
-    try {
-      setRecent(JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"));
-    } catch {
-      setRecent([]);
-    }
+    setRecent(readRecent());
+    // A project folder that has since been deleted should stop being listed.
+    pruneRecent().then(setRecent).catch(() => {});
   }
 
   const reloadSessions = useCallback(async () => {
@@ -222,6 +232,16 @@ export default function Page() {
       .then(reloadSessions)
       .catch(() => {});
   }, [busy, reloadSessions]);
+
+  // The run just settled and something is waiting: send it now. This is the
+  // other half of queuing — run() enqueues while busy, this drains it once free.
+  useEffect(() => {
+    if (busy || queue.length === 0) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    void run(next.text, next.meta);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, queue]);
 
   const refresh = useCallback(async () => {
     const ws = await api.workspace();
@@ -324,9 +344,36 @@ export default function Page() {
     const line = formatEvent(ev);
     if (line) setLog((prev) => mergeLog(prev, line));
     if (ev.type === "done") {
+      // A run that only called tools and never streamed a final answer used
+      // to leave an empty summary line, which groupLog then drops entirely —
+      // the feed just stopped with no sign the run was ever done.
+      const text = ev.summary.trim() || "Done.";
       setLog((prev) =>
-        prev.some((l) => l.kind === "token") ? prev : [...prev, { kind: "ok", text: ev.summary }],
+        prev.some((l) => l.kind === "token") ? prev : [...prev, { kind: "ok", text }],
       );
+    }
+    // Arrives after Done, once the run has actually settled server-side —
+    // attach the "undo this message" snapshot to this run's reply. Saved
+    // straight to the session too: the persist-on-settle effect fires when
+    // `busy` flips false, which is on Done — a beat before this arrives — so
+    // without this the revert data would work for the live session but be
+    // gone on reload.
+    if (ev.type === "snapshot") {
+      const prev = live.current.log;
+      const i = prev.map((l, idx) => (l.kind === "ok" || l.kind === "token" ? idx : -1))
+        .filter((idx) => idx >= 0)
+        .pop();
+      if (i !== undefined) {
+        const updated = prev.slice();
+        updated[i] = { ...updated[i], revert: ev.files };
+        setLog(updated);
+        const { sessionId: id, promptShown: t, sessionFolder: dir } = live.current;
+        if (id && dir) {
+          saveSession({ id, folder: dir, title: t || "Untitled", log: updated, at: Date.now() })
+            .then(reloadSessions)
+            .catch(() => {});
+        }
+      }
     }
   }
 
@@ -342,7 +389,14 @@ export default function Page() {
    * had done nothing. Clicking it again while the current chat is still empty
    * reuses that one rather than stacking up blank rows.
    */
-  function newTask() {
+  /**
+   * `forFolder` is the project the new chat belongs to. It has to be passed
+   * explicitly when opening a project, because `folder` state is only updated
+   * by the `refresh()` that runs *after* this — so a blank chat used to be
+   * filed under the project you just left, or dropped entirely when opening
+   * your first one.
+   */
+  function newTask(forFolder?: string | null) {
     setLog([]);
     setPromptShown("");
     setAgentLog("");
@@ -353,21 +407,24 @@ export default function Page() {
     setErr("");
     if (sessionId && log.length === 0) return;
 
+    const dir = forFolder ?? folder;
     const id = newSessionId();
     setSessionId(id);
-    setSessionFolder(folder);
-    if (!folder) return;
-    saveSession({ id, folder, title: NEW_CHAT_TITLE, log: [], at: Date.now() })
+    setSessionFolder(dir);
+    if (!dir) return;
+    saveSession({ id, folder: dir, title: NEW_CHAT_TITLE, log: [], at: Date.now() })
       .then(reloadSessions)
       .catch(() => {});
-  }  async function pick() {
+  }
+
+  async function pick() {
     setErr("");
     try {
       const r = await api.pick();
       if (!r.path) return;
       rememberRecent(r.path);
       loadRecent();
-      newTask();
+      newTask(r.path);
       setShowPicker(false);
       await refresh();
     } catch (e) {
@@ -380,7 +437,7 @@ export default function Page() {
     try {
       const wasOpen = normPath(path) === normPath(folder ?? "");
       await api.open(path);
-      if (!wasOpen) newTask();
+      if (!wasOpen) newTask(path);
       rememberRecent(path);
       loadRecent();
       setShowPicker(false);
@@ -427,7 +484,14 @@ export default function Page() {
 
   async function run(text: string, meta: SubmitMeta) {
     setErr("");
-    if (!text.trim() || busy) return;
+    if (!text.trim() && meta.attachments.length === 0) return;
+    // A run is already in flight: queue this one instead of dropping it (the
+    // composer already cleared its own input on submit either way) — it fires
+    // the moment the current run settles, see the drain effect below.
+    if (busy) {
+      setQueue((prev) => [...prev, { text, meta }]);
+      return;
+    }
     // Last run's plan is not this run's plan.
     setTodos([]);
 
@@ -441,8 +505,15 @@ export default function Page() {
     // plain hellos through the whole planner/coder pipeline.
     const mode = meta.mode || "Auto";
     const effort = (meta.effort || "Medium").toLowerCase();
-    const names = meta.attachments.map((f) => f.name).join(", ");
-    const body = names ? [`Images attached in the UI: ${names}`, "", text].join("\n") : text;
+    // Sent to the backend, which saves each into the workspace (so the agent's
+    // own tools can copy/reference the real file) and hands the model an
+    // actual vision block, not just a filename mention.
+    const images = await Promise.all(
+      meta.attachments.map(async (f) => ({ name: f.name, data_url: await fileToDataUrl(f) })),
+    );
+    // The bubble shows the image too — kept as a data URL so it round-trips
+    // through the session's stored JSON log and is still there on reload.
+    const imageUrls = images.map((i) => i.data_url);
 
     // Continue the open session instead of starting a new one on every send.
     // A fresh id is minted only when nothing is open (New task, or first message).
@@ -454,9 +525,12 @@ export default function Page() {
       setSessionFolder(folder);
     }
     // The session title stays the first message, so the sidebar name is stable.
-    const title = promptShown || text;
-    if (!promptShown) setPromptShown(text);
-    const withUser: LogItem[] = [...log, { kind: "user", text }];
+    const title = promptShown || text || "Image";
+    if (!promptShown) setPromptShown(text || "Image");
+    const withUser: LogItem[] = [
+      ...log,
+      { kind: "user", text, ...(imageUrls.length ? { images: imageUrls } : {}) },
+    ];
     setLog(withUser);
     // Save on send, not on finish. The transcript used to be written only once
     // a run settled, so a chat was missing from the sidebar for the whole time
@@ -476,7 +550,10 @@ export default function Page() {
     // it forever, so the run never "finished" and the transcript was never saved.
     setBusy(true);
     try {
-      await api.runAgent(body, id, mode, effort, sid);
+      // The backend requires a non-empty prompt; an image-only send has
+      // nothing typed, so give it a minimal instruction rather than 400ing.
+      const sent = text.trim() || "Use the attached image.";
+      await api.runAgent(sent, id, mode, effort, sid, images);
       setPrompt("");
     } catch (e) {
       myRun.current = false;
@@ -510,6 +587,36 @@ export default function Page() {
       // Rethrow so the commit button leaves its "Committing…" state and keeps
       // the typed message for a retry; the error itself is reported above.
       throw e;
+    }
+  }
+
+  /** Undo one reply's changes: puts every file it touched back to how this
+   *  run found it. `agent_revert` writes straight to disk and does not run
+   *  through the agent event guard, so the panels are refreshed by hand. */
+  async function revertMessage(item: LogItem) {
+    if (!item.revert || item.reverted) return;
+    setErr("");
+    try {
+      const res = await api.revertFiles(item.revert);
+      if (!res.ok) {
+        setErr(`Undo failed for: ${res.failed.join(", ")}`);
+      }
+      const updated = log.map((l) => (l === item ? { ...l, reverted: true } : l));
+      setLog(updated);
+      if (sessionId && sessionFolder) {
+        saveSession({
+          id: sessionId,
+          folder: sessionFolder,
+          title: promptShown || "Untitled",
+          log: updated,
+          at: Date.now(),
+        })
+          .then(reloadSessions)
+          .catch(() => {});
+      }
+      await refresh();
+    } catch (e) {
+      setErr(errText(e));
     }
   }
 
@@ -641,10 +748,27 @@ export default function Page() {
             todos={todos}
             pending={pendingAsk}
             onDecide={decideAsk}
+            onRevert={revertMessage}
           />
 
           <div className="composer-wrap">
             <ContextBar project={project} git={git} stat={stat} onCommit={commit} />
+            {queue.length > 0 && (
+              <div className="queue-strip">
+                {queue.map((q, i) => (
+                  <span key={i} className="queue-chip">
+                    <span className="queue-chip-text">{q.text}</span>
+                    <button
+                      className="queue-chip-x"
+                      title="Remove from queue"
+                      onClick={() => setQueue((prev) => prev.filter((_, j) => j !== i))}
+                    >
+                      <IconClose />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <Composer
               value={prompt}
               busy={busy}

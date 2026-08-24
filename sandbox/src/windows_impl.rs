@@ -1,4 +1,6 @@
-//! Unelevated Windows sandbox: Job Object + restricted token + network-deny env.
+//! Unelevated Windows sandbox: Job Object + restricted token, resource-capped
+//! (memory, process count, wall-clock timeout) but with real network access —
+//! commands run here can install packages and clone repos like a normal shell.
 //! No Docker. Works on Windows Home without admin.
 //!
 //! ponytail: skip rewriting NTFS DACLs (easy to lock the user out of their own folder).
@@ -37,7 +39,11 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 
-const MAX_MEM: usize = 1024 * 1024 * 1024;
+// Per-process cap (JOB_OBJECT_LIMIT_PROCESS_MEMORY is per-process, not per-job).
+// 1GB used to be the default and killed ordinary `npm run build` /
+// `next build` runs outright — a Next.js/Turbopack build routinely wants
+// more than that on its own, well before anything runs away.
+const MAX_MEM: usize = 4 * 1024 * 1024 * 1024;
 const MAX_PROCS: u32 = 64;
 const WRITE_BUF: usize = 64 * 1024;
 
@@ -453,8 +459,12 @@ mod resolve_tests {
 }
 
 fn env_block(ws: &WorkspaceRoot, tmp: &Path) -> Vec<u16> {
+    // Real network access, on purpose: this used to point HTTPS_PROXY/etc at a
+    // dead port to stop shell commands reaching the network at all, which also
+    // took every package install (npm/pip/cargo/git clone) down with it. The
+    // agent's own web_fetch/web_search tools keep their separate loopback/SSRF
+    // checks regardless of what a shell command can reach.
     let mut pairs = crate::passthrough_env();
-    pairs.extend(crate::deny_network_env());
     let tmp_s = tmp.to_string_lossy().into_owned();
     pairs.push(("TEMP".into(), tmp_s.clone()));
     pairs.push(("TMP".into(), tmp_s));
@@ -631,6 +641,18 @@ unsafe fn spawn_and_wait(
         // the reader threads below finish.
         let _ = TerminateJobObject(job, 1);
         WaitForSingleObject(pi.hProcess, 5_000);
+    } else {
+        // The tracked process (cmd.exe, or the program itself) exited on its
+        // own, but a detached grandchild can still be alive — `kiro .` / `code
+        // .` resolve to a launcher script that hands off to the real app and
+        // returns immediately, and that app was never meant to die with the
+        // command that started it. JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE kills
+        // every process still in the job the instant its last handle closes,
+        // with no way to ask "only if I'm terminating on purpose" — so drop
+        // the flag right before that close. It stays set for the rest of the
+        // run, so a crash of this process still reaps a runaway child; only
+        // this deliberate, already-finished exit is exempted.
+        let _ = clear_kill_on_job_close(job);
     }
 
     let mut code: u32 = 1;
@@ -657,6 +679,25 @@ unsafe fn spawn_and_wait(
         stdout,
         stderr,
     })
+}
+
+/// Turns off `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for a job that already
+/// finished on its own, so a still-running detached grandchild is not swept
+/// away when we close our handle a moment later.
+unsafe fn clear_kill_on_job_close(job: HANDLE) -> Result<()> {
+    let mut ext = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    ext.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    ext.BasicLimitInformation.ActiveProcessLimit = MAX_PROCS;
+    ext.ProcessMemoryLimit = MAX_MEM;
+    SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &ext as *const _ as *const _,
+        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+    )
+    .context("clear kill-on-close")?;
+    Ok(())
 }
 
 unsafe fn apply_job_limits(job: HANDLE) -> Result<()> {

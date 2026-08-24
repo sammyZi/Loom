@@ -1,6 +1,6 @@
 "use client";
 
-import { IconMark } from "@/components/Icons";
+import { IconMark, IconUndo } from "@/components/Icons";
 import { CopyButton, Markdown, SpeakButton } from "@/components/Markdown";
 import type { TodoItem } from "@/lib/api";
 import { groupLog, secs, type LogItem } from "@/lib/log";
@@ -16,6 +16,7 @@ export function Feed({
   todos = [],
   pending,
   onDecide,
+  onRevert,
 }: {
   prompt: string;
   log: LogItem[];
@@ -28,6 +29,8 @@ export function Feed({
   /** Open approval request (manual mode): the agent wants to run a command. */
   pending?: { id: string; program: string; args: string } | null;
   onDecide?: (allow: boolean) => void;
+  /** Undo the files a reply changed, back to how this run found them. */
+  onRevert?: (item: LogItem) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -39,11 +42,16 @@ export function Feed({
   }, [log, prompt, busy]);
 
   const groups = groupLog(log);
-  // groupLog leaves exactly one think group per turn. While the run is live the
-  // status line owns it and the flow skips it; when it settles the flow keeps
-  // it as the record. Either way it is on screen once — the index is what ties
-  // the two together, so they can never both decide to show it.
-  const thinkAt = groups.findIndex((g) => !("items" in g) && g.kind === "think");
+  // groupLog leaves one think group per turn. While the run is live the status
+  // line owns *this turn's* block and the flow skips it; when it settles the
+  // flow keeps it as the record. Either way it is on screen once — the index is
+  // what ties the two together, so they can never both decide to show it.
+  // It must be the block after the last user message: matching the first one in
+  // the session hid an old turn's reasoning and drew this turn's a second time.
+  const lastUser = groups.map((g) => ("items" in g ? "" : g.kind)).lastIndexOf("user");
+  const thinkAt = groups.findIndex(
+    (g, i) => i > lastUser && !("items" in g) && g.kind === "think",
+  );
   const thinkGroup = thinkAt >= 0 ? (groups[thinkAt] as LogItem) : null;
   const liveThink = busy && thinkGroup ? thinkGroup.text : "";
   return (
@@ -67,6 +75,9 @@ export function Feed({
         {prompt && !log.some((l) => l.kind === "user") && (
           <div className="user-row">
             <div className="user-bubble">{prompt}</div>
+            <div className="user-actions">
+              <CopyButton text={prompt} />
+            </div>
           </div>
         )}
 
@@ -77,7 +88,7 @@ export function Feed({
           return "items" in g ? (
             <ToolLine key={i} items={g.items} running={busy && last} />
           ) : (
-            <Message key={i} item={g} live={busy && last} />
+            <Message key={i} item={g} live={busy && last} onRevert={onRevert} />
           );
         })}
 
@@ -163,11 +174,38 @@ function TodoList({ todos }: { todos: TodoItem[] }) {
   );
 }
 
-function Message({ item, live }: { item: LogItem; live: boolean }) {
+function Message({
+  item,
+  live,
+  onRevert,
+}: {
+  item: LogItem;
+  live: boolean;
+  onRevert?: (item: LogItem) => void;
+}) {
   if (item.kind === "user") {
     return (
       <div className="user-row">
-        <div className="user-bubble">{item.text}</div>
+        <div className="user-bubble">
+          {item.images && item.images.length > 0 && (
+            <div className="user-images">
+              {item.images.map((src, i) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={i}
+                  src={src}
+                  alt=""
+                  className="user-image"
+                  onClick={() => window.open(src, "_blank")}
+                />
+              ))}
+            </div>
+          )}
+          {item.text}
+        </div>
+        <div className="user-actions">
+          <CopyButton text={item.text} />
+        </div>
       </div>
     );
   }
@@ -210,6 +248,21 @@ function Message({ item, live }: { item: LogItem; live: boolean }) {
           <div className="event-actions">
             <CopyButton text={item.text} />
             <SpeakButton text={item.text} />
+            {item.revert && Object.keys(item.revert).length > 0 && (
+              <button
+                className={`copy-btn ${item.reverted ? "ok" : ""}`}
+                onClick={() => onRevert?.(item)}
+                disabled={item.reverted}
+                title={
+                  item.reverted
+                    ? "Already undone"
+                    : `Undo: put ${Object.keys(item.revert).length} file(s) back to before this reply`
+                }
+              >
+                <IconUndo />
+                <span>{item.reverted ? "Undone" : "Undo"}</span>
+              </button>
+            )}
           </div>
         )}
       </div>

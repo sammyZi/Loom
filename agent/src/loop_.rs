@@ -30,6 +30,10 @@ pub struct RunEnv {
     pub writes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Bytes of whole-file content served this task; bounds runaway reading.
     pub read_budget: Arc<std::sync::atomic::AtomicUsize>,
+    /// Content each written path had the *first* time this task touched it —
+    /// `None` means the path did not exist yet. Lets "undo this message" put
+    /// every file it touched back exactly where it started, without a commit.
+    pub before: Arc<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -40,6 +44,10 @@ pub async fn run_agent(
     effort: String,
     tools: ToolRegistry,
     announce_done: bool,
+    // Tool-call turns before this role gives up and hands back whatever it
+    // has. Was a hardcoded 24 for every role; callers now size it to the job
+    // (a coder doing real work needs far more than a read-only reviewer).
+    max_turns: u32,
     env: &RunEnv,
     seed: Vec<Message>,
     perm: Option<PermGate>,
@@ -68,6 +76,7 @@ pub async fn run_agent(
         reads: env.reads.clone(),
         writes: env.writes.clone(),
         read_budget: env.read_budget.clone(),
+        before: env.before.clone(),
     };
     let mut messages = seed;
     messages.push(Message::user_text(prompt));
@@ -78,7 +87,7 @@ pub async fn run_agent(
     // the streaming callback owns its captures.
     let measured_input = Arc::new(std::sync::Mutex::new(None::<u64>));
 
-    for _ in 0..24 {
+    for _ in 0..max_turns {
         if env.cancel.is_cancelled() {
             anyhow::bail!("cancelled");
         }
@@ -208,8 +217,22 @@ pub async fn run_agent(
             });
         }
     }
-    let _ = env.events.send(AgentEvent::Done { summary: last_text });
-    anyhow::bail!("tool loop limit reached")
+    // The budget ran out mid-work, not mid-answer — bailing here used to
+    // surface to the user as a bare "tool loop limit reached", which explains
+    // nothing. Hand back a real sentence instead, same as the pipeline's other
+    // early-stop paths (wrote_nothing, a stalled review round).
+    let note = if last_text.trim().is_empty() {
+        format!(
+            "Stopped after {max_turns} tool-call turns without a final summary — the task was \
+             larger than this turn's budget. The work so far may be partial; ask me to continue."
+        )
+    } else {
+        last_text
+    };
+    if announce_done {
+        let _ = env.events.send(AgentEvent::Done { summary: note.clone() });
+    }
+    Ok(note)
 }
 
 /// Context metering: prefer real provider-reported input tokens when we have

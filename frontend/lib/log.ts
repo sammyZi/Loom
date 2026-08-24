@@ -1,6 +1,17 @@
 import { type AgentEvent } from "./api";
 
-export type LogItem = { kind: string; text: string; detail?: string };
+/** `images` is data: URLs — small enough for the odd screenshot, and it has
+ *  to survive round-tripping through the session's stored JSON log.
+ *  `revert` is the snapshot for "undo this message" (path -> content before
+ *  this run, `null` meaning the run created it); `reverted` marks it used. */
+export type LogItem = {
+  kind: string;
+  text: string;
+  detail?: string;
+  images?: string[];
+  revert?: Record<string, string | null>;
+  reverted?: boolean;
+};
 
 /**
  * Turn a tool call into a "Read foo.ts" / "Edited bar.rs" / "Ran cargo test" line,

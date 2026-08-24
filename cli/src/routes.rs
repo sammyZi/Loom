@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{id}/archive", post(sessions_archive))
         .route("/sessions/{id}/unarchive", post(sessions_unarchive))
         .route("/agent/run", post(agent_run))
+        .route("/agent/revert", post(agent_revert))
         .route("/agent/cancel", post(agent_cancel))
         .route("/agent/permission", post(agent_permission))
         .route("/agent/models", get(agent_models))
@@ -246,6 +247,52 @@ struct RunBody {
     /// to the model so follow-ups keep their context.
     #[serde(default)]
     session_id: Option<String>,
+    /// Images attached in the composer, as `data:` URLs straight from the
+    /// browser's FileReader.
+    #[serde(default)]
+    images: Vec<ImageAttachment>,
+}
+
+#[derive(Deserialize)]
+struct ImageAttachment {
+    name: String,
+    data_url: String,
+}
+
+/// Saves an attachment into the workspace (so the agent's own tools can copy
+/// or reference it on disk, e.g. into `public/`) and builds the vision content
+/// block the model sees alongside the note. Returns `None` for anything that
+/// is not a well-formed `data:` URL rather than failing the whole run over one
+/// bad attachment.
+fn stage_attachment(ws: &WorkspaceRoot, att: &ImageAttachment) -> Option<(String, serde_json::Value)> {
+    let rest = att.data_url.strip_prefix("data:")?;
+    let (meta, b64) = rest.split_once(',')?;
+    let mime = meta.split(';').next().unwrap_or("application/octet-stream");
+    let ext = mime.strip_prefix("image/").unwrap_or("bin");
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+
+    let stem: String = att
+        .name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(&att.name)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .take(60)
+        .collect();
+    let stem = if stem.is_empty() { "image".to_string() } else { stem };
+
+    let mut rel = format!(".uploads/{stem}.{ext}");
+    let mut n = 1u32;
+    while ws.resolve(&rel).map(|p| p.exists()).unwrap_or(false) {
+        rel = format!(".uploads/{stem}-{n}.{ext}");
+        n += 1;
+    }
+    viewer::write_bytes(ws, &rel, &bytes).ok()?;
+
+    let block = serde_json::json!({ "type": "image_url", "image_url": { "url": att.data_url } });
+    Some((rel, block))
 }
 
 /// How much chat memory rides along with a run. Old turns fall off the front.
@@ -407,6 +454,36 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
     };
     trim_history(&mut history);
 
+    // Attachments: saved to disk so the agent's own tools can read or copy
+    // them into the project, and turned into a vision content block so the
+    // model actually sees the image rather than just its filename.
+    let mut image_msg: Option<agent::Message> = None;
+    if !body.images.is_empty() {
+        let mut saved_paths = Vec::new();
+        let mut blocks = Vec::new();
+        for att in &body.images {
+            if let Some((rel, block)) = stage_attachment(&ws, att) {
+                saved_paths.push(rel);
+                blocks.push(block);
+            }
+        }
+        if !blocks.is_empty() {
+            let note = format!(
+                "Image{} attached, saved in the workspace at: {} — that is a real file on disk, \
+                 so copy or reference it directly (e.g. into public/ or wherever the app keeps \
+                 assets) rather than recreating it.",
+                if saved_paths.len() == 1 { "" } else { "s" },
+                saved_paths.join(", "),
+            );
+            let mut parts = vec![serde_json::json!({ "type": "text", "text": note })];
+            parts.extend(blocks);
+            image_msg = Some(agent::Message::user_blocks(parts));
+        }
+    }
+    if let Some(m) = &image_msg {
+        history.push(m.clone());
+    }
+
     // Manual mode gates shell commands behind explicit approval.
     let perm = if mode == orchestrator::Mode::Manual {
         let gate = agent::PermGate::new();
@@ -417,6 +494,11 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         None
     };
 
+    // Kept outside `env` (which the task consumes) so the snapshot is still
+    // readable after the run finishes.
+    let before_snapshot: std::sync::Arc<
+        std::sync::Mutex<HashMap<String, Option<String>>>,
+    > = Default::default();
     let env = agent::RunEnv {
         ws,
         sandbox: st.sandbox.clone(),
@@ -430,6 +512,7 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         reads: Default::default(),
         writes: Default::default(),
         read_budget: Default::default(),
+        before: before_snapshot.clone(),
     };
     let prompt = body.prompt;
     tokio::spawn(async move {
@@ -440,10 +523,22 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         // run can have replaced the token: clearing unconditionally is safe.
         *st.cancel.lock().await = None;
         *st.active_perm.lock().await = None;
+        if let Ok(files) = before_snapshot.lock() {
+            if !files.is_empty() {
+                let _ = st.agent_tx.send(AgentEvent::Snapshot {
+                    files: files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                });
+            }
+        }
         if let Ok(answer) = &result {
             if let Some(id) = &session_key {
                 let mut map = st.histories.lock().await;
                 let entry = map.entry(id.clone()).or_default();
+                // Keeps a follow-up turn ("make it bigger") able to see the
+                // image too, not just this run.
+                if let Some(m) = image_msg {
+                    entry.push(m);
+                }
                 entry.push(agent::Message::user_text(prompt.clone()));
                 entry.push(agent::Message {
                     role: "assistant".into(),
@@ -482,6 +577,45 @@ async fn agent_cancel(State(st): State<AppState>) -> impl IntoResponse {
         tracing::info!("stop button killed {killed} agent job(s)");
     }
     Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct RevertBody {
+    /// path -> what it held before the run that is being undone; `null` means
+    /// the run created the file, so reverting deletes it. Comes straight from
+    /// the `AgentEvent::Snapshot` the frontend received for that message.
+    files: HashMap<String, Option<String>>,
+}
+
+/// Undo one message's changes: puts every file it touched back to what it
+/// held right before that run started.
+async fn agent_revert(State(st): State<AppState>, Json(body): Json<RevertBody>) -> impl IntoResponse {
+    let ws = match st.require_ws().await {
+        Ok(w) => w,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    if st.running.load(Ordering::SeqCst) {
+        return err(StatusCode::CONFLICT, "an agent task is running — stop it first");
+    }
+    let mut reverted = Vec::new();
+    let mut failed = Vec::new();
+    for (path, before) in &body.files {
+        let result = match before {
+            Some(content) => viewer::write_file(&ws, path, content),
+            None => viewer::delete_file(&ws, path),
+        };
+        match result {
+            Ok(()) => {
+                // Piggybacks on the existing Diff-triggered refresh; the
+                // content is unused by the panel, which re-fetches from git.
+                let _ = st.agent_tx.send(AgentEvent::Diff { path: path.clone(), diff: String::new() });
+                reverted.push(path.clone());
+            }
+            Err(e) => failed.push(format!("{path}: {e}")),
+        }
+    }
+    Json(serde_json::json!({ "ok": failed.is_empty(), "reverted": reverted, "failed": failed }))
+        .into_response()
 }
 
 #[derive(Deserialize)]

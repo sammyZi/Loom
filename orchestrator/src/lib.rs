@@ -2,6 +2,14 @@ use agent::{run_agent, Message, PermGate, RunEnv, ToolRegistry};
 use anyhow::Result;
 use ide_core::{AgentEvent, AgentRole, Permission, PermissionSet};
 
+/// Tool-call turns before a role's loop gives up and hands back whatever it
+/// has. Was one hardcoded 24 for every role; sized here to the job instead —
+/// the coder is the one doing the real work and ran out first on large asks.
+const TURNS_INVESTIGATE: u32 = 20;
+const TURNS_CODE: u32 = 40;
+const TURNS_REVIEW: u32 = 15;
+const TURNS_TRIVIAL: u32 = 6;
+
 /// How much of the pipeline a run uses. Picked by the user in the composer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -50,6 +58,7 @@ pub async fn run_task(
             effort,
             ToolRegistry::read_only(),
             true,
+            TURNS_INVESTIGATE,
             &env,
             history,
             None,
@@ -68,6 +77,7 @@ pub async fn run_task(
             effort.clone(),
             ToolRegistry::full(),
             true,
+            TURNS_CODE,
             &env,
             history,
             perm,
@@ -90,6 +100,7 @@ pub async fn run_task(
             effort,
             ToolRegistry::none(),
             true,
+            TURNS_TRIVIAL,
             &env,
             history,
             None,
@@ -119,6 +130,7 @@ pub async fn run_task(
         effort.clone(),
         ToolRegistry::read_only(),
         false,
+        TURNS_INVESTIGATE,
         &env,
         history.clone(),
         perm.clone(),
@@ -170,6 +182,7 @@ pub async fn run_task(
             effort.clone(),
             coder_tools(),
             false,
+            TURNS_CODE,
             &env,
             // The coder sees the conversation too. It used to get an empty
             // seed, so a follow-up like "now make it blue" arrived with no
@@ -210,6 +223,7 @@ pub async fn run_task(
             effort.clone(),
             ToolRegistry::read_only(),
             false,
+            TURNS_REVIEW,
             &env,
             Vec::new(),
             None,
@@ -474,6 +488,10 @@ fn subagent_runner(env: &RunEnv, model: String, effort: String) -> agent::Subage
                 effort,
                 tools,
                 false,
+                // Finally wired up: this field has named a per-agent budget
+                // since agents.rs was written, but nothing ever read it and
+                // every subagent shared one hardcoded cap regardless of role.
+                def.steps,
                 &child,
                 Vec::new(),
                 None,
@@ -519,6 +537,7 @@ async fn spawn_role(
     effort: String,
     tools: ToolRegistry,
     announce_done: bool,
+    max_turns: u32,
     env: &RunEnv,
     seed: Vec<Message>,
     perm: Option<PermGate>,
@@ -530,9 +549,10 @@ async fn spawn_role(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<String>>(1);
     let env = env.clone();
     let handle = tokio::spawn(async move {
-        let r =
-            run_agent(role, prompt, model, effort, tools, announce_done, &env, seed, perm, perms, spawn)
-                .await;
+        let r = run_agent(
+            role, prompt, model, effort, tools, announce_done, max_turns, &env, seed, perm, perms, spawn,
+        )
+        .await;
         let _ = tx.send(r).await;
     });
     let out = rx

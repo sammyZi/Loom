@@ -274,6 +274,13 @@ pub enum AgentEvent {
     Usage { tokens: u64 },
     Done { summary: String },
     Error { message: String },
+    /// Every file this run wrote, mapped to what it held right before this
+    /// run touched it — `null` means the file did not exist yet. Sent once
+    /// after the run settles, only when something was actually written.
+    /// Backs "undo this message" in the feed.
+    Snapshot {
+        files: std::collections::BTreeMap<String, Option<String>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

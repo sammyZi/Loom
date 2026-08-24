@@ -79,3 +79,23 @@ pub fn write_file(ws: &WorkspaceRoot, rel: &str, content: &str) -> Result<()> {
     }
     fs::write(&path, content).context("write file")
 }
+
+/// Same as `write_file` but for raw bytes — an attached image, not source text.
+pub fn write_bytes(ws: &WorkspaceRoot, rel: &str, content: &[u8]) -> Result<()> {
+    let path = ws.resolve(rel)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("mkdir")?;
+    }
+    fs::write(&path, content).context("write file")
+}
+
+/// Removes a file the agent created — undoing a write whose "before" state
+/// was "did not exist". A no-op if it is already gone.
+pub fn delete_file(ws: &WorkspaceRoot, rel: &str) -> Result<()> {
+    let path = ws.resolve(rel)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("delete file"),
+    }
+}

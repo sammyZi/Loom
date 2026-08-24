@@ -38,6 +38,12 @@ export const api = {
       path: string;
     }>,
   tree: () => req("/files/tree"),
+  /** True when `path` is still a readable directory. Used to drop recent
+   *  projects whose folder has since been deleted or moved. */
+  dirExists: (path: string) =>
+    req(`/fs/list?path=${encodeURIComponent(path)}`)
+      .then(() => true)
+      .catch(() => false),
   content: (path: string) =>
     req(`/files/content?path=${encodeURIComponent(path)}`) as Promise<{
       path: string;
@@ -51,10 +57,26 @@ export const api = {
     req(`/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`) as Promise<{ diff: string }>,
   commit: (message: string) =>
     req("/git/commit", { method: "POST", body: JSON.stringify({ message }) }),
-  runAgent: (prompt: string, model: string, mode: string, effort: string, sessionId?: string) =>
+  runAgent: (
+    prompt: string,
+    model: string,
+    mode: string,
+    effort: string,
+    sessionId?: string,
+    // (name, data URL) pairs — the backend saves each into the workspace and
+    // sends it to the model as a vision block, not just a filename mention.
+    images?: { name: string; data_url: string }[],
+  ) =>
     req("/agent/run", {
       method: "POST",
-      body: JSON.stringify({ prompt, model, mode, effort, session_id: sessionId }),
+      body: JSON.stringify({
+        prompt,
+        model,
+        mode,
+        effort,
+        session_id: sessionId,
+        images: images ?? [],
+      }),
     }),
   /** Answer an approval request for a shell command (manual mode). */
   answerPermission: (id: string, allow: boolean) =>
@@ -63,6 +85,13 @@ export const api = {
       body: JSON.stringify({ id, allow }),
     }),
   cancelAgent: () => req("/agent/cancel", { method: "POST" }),
+  /** Puts every file in `files` back to its mapped content (`null` deletes it). */
+  revertFiles: (files: Record<string, string | null>) =>
+    req("/agent/revert", { method: "POST", body: JSON.stringify({ files }) }) as Promise<{
+      ok: boolean;
+      reverted: string[];
+      failed: string[];
+    }>,
   shell: (cmd: string, id: string, background = false) =>
     req("/shell/run", {
       method: "POST",
@@ -237,7 +266,10 @@ export type AgentEvent =
   | { type: "browse"; url: string }
   | { type: "usage"; tokens: number }
   | { type: "done"; summary: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /** Every file this run wrote, mapped to what it held right before — `null`
+   *  means the run created it. Backs the "Undo" button on this run's reply. */
+  | { type: "snapshot"; files: Record<string, string | null> };
 
 export type TodoItem = { text: string; status: "pending" | "running" | "done" };
 

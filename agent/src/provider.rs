@@ -346,6 +346,19 @@ impl Message {
         }
     }
 
+    /// A user turn built from content blocks (OpenAI's `text` / `image_url`
+    /// shape) instead of a single string — the only way to carry an attached
+    /// image. `openai_stream` sends this shape through unchanged;
+    /// `to_anthropic_messages` translates each block for the Anthropic engine.
+    pub fn user_blocks(blocks: Vec<Value>) -> Self {
+        Self {
+            role: "user".into(),
+            content: Some(Value::Array(blocks)),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
     /// Plain-text view used for size accounting and summaries.
     pub fn preview(&self) -> String {
         self.content
@@ -358,6 +371,14 @@ impl Message {
     fn text(&self) -> String {
         match self.content.as_ref() {
             Some(Value::String(s)) => s.clone(),
+            // Content blocks (an attached image alongside text): join the
+            // text parts and drop the image, for callers that only want words
+            // — `other.to_string()` here used to dump the raw base64 payload.
+            Some(Value::Array(blocks)) => blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Some(other) => other.to_string(),
             None => String::new(),
         }
@@ -984,6 +1005,16 @@ async fn anthropic_stream(
 /// OpenAI-style history → Anthropic turns: roles strictly alternate, tool
 /// results ride inside `user` messages as `tool_result` blocks, consecutive
 /// same-role turns merge (Anthropic rejects adjacent duplicates).
+/// Splits a `data:<mime>;base64,<data>` URL into its media type and raw
+/// base64 payload. Anthropic wants those as two separate fields; the browser
+/// (and OpenAI's `image_url` shape) hands us one string.
+fn parse_data_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let mime = meta.split(';').next().unwrap_or("application/octet-stream");
+    Some((mime, data))
+}
+
 fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let push = |role: &str, block: Value, out: &mut Vec<Value>| {
@@ -998,9 +1029,44 @@ fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {
     for m in messages {
         match m.role.as_str() {
             "user" => {
-                let text = m.text();
-                if !text.is_empty() {
-                    push("user", json!({ "type": "text", "text": text }), &mut out);
+                // A plain string is the common case; content blocks only show
+                // up on a turn carrying an attached image, and Anthropic wants
+                // its own image block shape rather than OpenAI's image_url.
+                if let Some(Value::Array(blocks)) = m.content.as_ref() {
+                    for b in blocks {
+                        match b.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => {
+                                if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                                    if !t.is_empty() {
+                                        push("user", json!({ "type": "text", "text": t }), &mut out);
+                                    }
+                                }
+                            }
+                            Some("image_url") => {
+                                let url = b["image_url"]["url"].as_str().unwrap_or("");
+                                if let Some((mime, data)) = parse_data_url(url) {
+                                    push(
+                                        "user",
+                                        json!({
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": mime,
+                                                "data": data,
+                                            }
+                                        }),
+                                        &mut out,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    let text = m.text();
+                    if !text.is_empty() {
+                        push("user", json!({ "type": "text", "text": text }), &mut out);
+                    }
                 }
             }
             "assistant" => {
@@ -1252,6 +1318,29 @@ mod tests {
         }];
         let out = super::to_anthropic_messages(&msgs);
         assert_eq!(out[0]["content"][0]["input"], json!({ "path": "a.rs" }));
+    }
+
+    /// An attached image: OpenAI's `image_url`/`text` blocks must translate to
+    /// Anthropic's own `image`/`text` shape, base64 payload split from its
+    /// media type — not get stringified whole as one text block (which used
+    /// to dump the raw base64 at the model as if it were prose).
+    #[test]
+    fn image_attachment_translates_to_anthropics_block_shape() {
+        let msg = Message::user_blocks(vec![
+            json!({ "type": "text", "text": "use this logo" }),
+            json!({ "type": "image_url", "image_url": { "url": "data:image/png;base64,QUJD" } }),
+        ]);
+        let out = super::to_anthropic_messages(&[msg]);
+        assert_eq!(out.len(), 1, "one user turn");
+        let blocks = out[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "use this logo" }));
+        assert_eq!(
+            blocks[1],
+            json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": "QUJD" }
+            })
+        );
     }
 
     #[test]

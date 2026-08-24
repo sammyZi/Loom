@@ -83,7 +83,7 @@ export function SpeakButton({ text, label = "Listen" }: { text: string; label?: 
 
   if (!supported) return null;
 
-  function toggle() {
+  async function toggle() {
     const synth = window.speechSynthesis;
     if (synth.speaking) {
       synth.cancel();
@@ -98,7 +98,11 @@ export function SpeakButton({ text, label = "Listen" }: { text: string; label?: 
     // It also keeps each chunk short, dodging the ~200-char cutoff some voices
     // hit on a single long utterance.
     const parts = said.match(/[^.!?]+[.!?]*\s*/g) ?? [said];
-    const voice = humanVoice(synth);
+    // getVoices() returns [] until the browser finishes loading its voice
+    // list, which had not happened yet on a first click — humanVoice() saw
+    // nothing to rank, u.voice stayed unset, and the engine's own fallback
+    // (Microsoft David on Windows) is the flattest voice available.
+    const voice = humanVoice(await voicesReady(synth));
     parts.forEach((part, i) => {
       const u = new SpeechSynthesisUtterance(part.trim());
       if (voice) u.voice = voice;
@@ -127,22 +131,41 @@ export function SpeakButton({ text, label = "Listen" }: { text: string; label?: 
 }
 
 /**
- * Prefer a natural-sounding local voice. Windows ships the flat "Microsoft
- * David/Zira" pair plus better "Online (Natural)" ones; browsers also expose
- * Google voices. Falls back to the default when none of them are installed.
+ * The list is empty until the engine finishes loading it — on Windows/Edge
+ * that happens asynchronously, so a voice picked on the very first call saw
+ * nothing and left the engine to its own flat default. Resolve once it is
+ * populated, or after a short wait if `voiceschanged` never fires.
  */
-function humanVoice(synth: SpeechSynthesis): SpeechSynthesisVoice | null {
-  const voices = synth.getVoices().filter((v) => v.lang.toLowerCase().startsWith("en"));
-  if (!voices.length) return null;
+function voicesReady(synth: SpeechSynthesis): Promise<SpeechSynthesisVoice[]> {
+  const now = synth.getVoices();
+  if (now.length) return Promise.resolve(now);
+  return new Promise((resolve) => {
+    const done = () => resolve(synth.getVoices());
+    synth.addEventListener("voiceschanged", done, { once: true });
+    setTimeout(done, 300);
+  });
+}
+
+/**
+ * Prefer a natural-sounding voice. Windows ships the flat legacy SAPI voices
+ * (David/Zira/Mark/Sam) alongside far better "Online (Natural)" ones; browsers
+ * also expose Google voices. Falls back to the default only when nothing
+ * better is installed.
+ */
+function humanVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+  const en = voices.filter((v) => v.lang.toLowerCase().startsWith("en"));
+  if (!en.length) return null;
   const rank = (v: SpeechSynthesisVoice) => {
     const n = v.name.toLowerCase();
     if (n.includes("natural")) return 0;
     if (n.includes("google")) return 1;
     if (n.includes("aria") || n.includes("jenny") || n.includes("guy")) return 2;
+    // The classic flat SAPI voices: always worse than an untested unknown.
+    if (/\b(david|zira|mark|sam)\b/.test(n)) return 5;
     if (v.localService) return 3;
     return 4;
   };
-  return [...voices].sort((a, b) => rank(a) - rank(b))[0] ?? null;
+  return [...en].sort((a, b) => rank(a) - rank(b))[0] ?? null;
 }
 
 /** Markdown flattened to something worth hearing. */

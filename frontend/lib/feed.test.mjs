@@ -36,7 +36,10 @@ function groupLog(log) {
 // while live and by the flow once it settles.
 function render(log, busy) {
   const groups = groupLog(log);
-  const thinkAt = groups.findIndex((g) => !("items" in g) && g.kind === "think");
+  const lastUser = groups.map((g) => ("items" in g ? "" : g.kind)).lastIndexOf("user");
+  const thinkAt = groups.findIndex(
+    (g, i) => i > lastUser && !("items" in g) && g.kind === "think",
+  );
   const liveThink = busy && thinkAt >= 0 ? groups[thinkAt].text : "";
   const flowThinks = groups.filter(
     (g, i) => !(busy && i === thinkAt) && !("items" in g) && g.kind === "think",
@@ -116,3 +119,22 @@ const countThinkRows = (groups) =>
 }
 
 console.log("feed: all checks passed");
+
+/// The reported bug: two "Thinking" rows on screen at once. Matching the first
+/// think group in the session hid turn one's reasoning and left turn two's in
+/// the flow next to the live status line, so the same thing appeared twice.
+{
+  const log = [user("one"), think("first turn"), token("done"), user("two"), think("second turn")];
+  const { liveThink, flowThinks } = render(log, true);
+  assert.equal(liveThink, "second turn", "the status line shows this turn's reasoning");
+  assert.equal(flowThinks.length, 1, "only the settled turn keeps a row");
+  assert.equal(flowThinks[0].text, "first turn");
+}
+
+// a new turn that has not reasoned yet leaves every earlier block in the flow
+{
+  const log = [user("one"), think("first turn"), token("done"), user("two")];
+  const { liveThink, flowThinks } = render(log, true);
+  assert.equal(liveThink, "");
+  assert.equal(flowThinks.length, 1);
+}

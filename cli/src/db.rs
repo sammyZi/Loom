@@ -37,11 +37,47 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS session (
      kind       TEXT NOT NULL,
      text       TEXT NOT NULL,
      detail     TEXT,
+     extra      TEXT,
      UNIQUE (session_id, seq)
  );
  CREATE INDEX IF NOT EXISTS session_folder_idx ON session(folder);
  CREATE INDEX IF NOT EXISTS session_created_idx ON session(created DESC);
  CREATE INDEX IF NOT EXISTS message_session_idx ON message(session_id, seq);";
+
+/// Fields a message row has its own column for; everything else on a log item
+/// (images, the undo snapshot, …) is JSON in `extra`.
+const OWN_COLUMNS: &[&str] = &["kind", "text", "detail"];
+
+/// Brings an existing database up to the current schema. `ADD COLUMN` fails
+/// once the column is there, which is the normal case and not an error.
+fn migrate(conn: &Connection) {
+    let _ = conn.execute("ALTER TABLE message ADD COLUMN extra TEXT", []);
+}
+
+/// The log item's fields beyond its own columns, as a JSON object string —
+/// `None` when there are none, so ordinary rows stay null.
+fn extra_json(item: &serde_json::Value) -> Option<String> {
+    let obj = item.as_object()?;
+    let rest: serde_json::Map<_, _> = obj
+        .iter()
+        .filter(|(k, _)| !OWN_COLUMNS.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if rest.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&rest).ok()
+}
+
+/// Folds a row's `extra` JSON back into the item it was split from.
+fn merge_extra(item: &mut serde_json::Value, extra: Option<String>) {
+    let (Some(raw), Some(obj)) = (extra, item.as_object_mut()) else { return };
+    if let Ok(serde_json::Value::Object(rest)) = serde_json::from_str(&raw) {
+        for (k, v) in rest {
+            obj.insert(k, v);
+        }
+    }
+}
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -59,6 +95,7 @@ impl Db {
         let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA).context("create schema")?;
+        migrate(&conn);
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -104,22 +141,23 @@ impl Db {
         // Newest-first per session, so truncating keeps the latest messages;
         // reversed again below to restore chronological order.
         let mut msgs = conn.prepare(
-            "SELECT session_id, id, kind, text, detail FROM message ORDER BY session_id, seq DESC",
+            "SELECT session_id, id, kind, text, detail, extra FROM message \
+             ORDER BY session_id, seq DESC",
         )?;
         let mut by_session: std::collections::HashMap<String, Vec<serde_json::Value>> =
             std::collections::HashMap::new();
         for row in msgs
             .query_map([], |r| {
                 let detail: Option<String> = r.get(4)?;
-                Ok((
-                    r.get::<_, String>(0)?,
-                    serde_json::json!({
-                        "id": r.get::<_, String>(1)?,
-                        "kind": r.get::<_, String>(2)?,
-                        "text": r.get::<_, String>(3)?,
-                        "detail": detail,
-                    }),
-                ))
+                let extra: Option<String> = r.get(5)?;
+                let mut item = serde_json::json!({
+                    "id": r.get::<_, String>(1)?,
+                    "kind": r.get::<_, String>(2)?,
+                    "text": r.get::<_, String>(3)?,
+                    "detail": detail,
+                });
+                merge_extra(&mut item, extra);
+                Ok((r.get::<_, String>(0)?, item))
             })?
             .flatten()
         {
@@ -156,8 +194,8 @@ impl Db {
         tx.execute("DELETE FROM message WHERE session_id = ?1", params![s.id])?;
         if let Some(items) = s.log.as_array() {
             let mut stmt = tx.prepare(
-                "INSERT INTO message (id, session_id, seq, kind, text, detail)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO message (id, session_id, seq, kind, text, detail, extra)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for (seq, item) in items.iter().enumerate() {
                 let kind = item["kind"].as_str().unwrap_or("token");
@@ -169,7 +207,8 @@ impl Db {
                     seq as i64,
                     kind,
                     text,
-                    detail
+                    detail,
+                    extra_json(item)
                 ])?;
             }
         }
@@ -230,7 +269,7 @@ impl Db {
         // Attach each archived transcript (same cap as list()).
         const MSG_CAP: usize = 300;
         let mut msgs = conn.prepare(
-            "SELECT m.session_id, m.id, m.kind, m.text, m.detail
+            "SELECT m.session_id, m.id, m.kind, m.text, m.detail, m.extra
              FROM message m JOIN session s ON s.id = m.session_id
              WHERE s.archived = 1 ORDER BY m.session_id, m.seq DESC",
         )?;
@@ -239,15 +278,15 @@ impl Db {
         for row in msgs
             .query_map([], |r| {
                 let detail: Option<String> = r.get(4)?;
-                Ok((
-                    r.get::<_, String>(0)?,
-                    serde_json::json!({
-                        "id": r.get::<_, String>(1)?,
-                        "kind": r.get::<_, String>(2)?,
-                        "text": r.get::<_, String>(3)?,
-                        "detail": detail,
-                    }),
-                ))
+                let extra: Option<String> = r.get(5)?;
+                let mut item = serde_json::json!({
+                    "id": r.get::<_, String>(1)?,
+                    "kind": r.get::<_, String>(2)?,
+                    "text": r.get::<_, String>(3)?,
+                    "detail": detail,
+                });
+                merge_extra(&mut item, extra);
+                Ok((r.get::<_, String>(0)?, item))
             })?
             .flatten()
         {
@@ -426,6 +465,31 @@ mod message_tests {
         assert_eq!(items[0]["kind"], "user");
         assert_eq!(items[1]["detail"], "App.tsx");
         assert_eq!(items[2]["text"], "It is a quiz app.");
+    }
+
+    /// A log item carries more than kind/text/detail — an attached image, the
+    /// undo snapshot — and those have no column of their own. Without the
+    /// `extra` blob they were silently dropped, so a reload lost the picture
+    /// from the message and the Undo button from the reply.
+    #[test]
+    fn fields_without_a_column_of_their_own_survive_a_round_trip() {
+        let db = mem();
+        db.upsert(&with_log(
+            "s1",
+            serde_json::json!([
+                { "kind": "user", "text": "use this", "images": ["data:image/png;base64,QUJD"] },
+                { "kind": "ok", "text": "done", "revert": { "a.txt": "before", "new.txt": null } },
+                { "kind": "token", "text": "plain" }
+            ]),
+        ))
+        .unwrap();
+
+        let log = db.list().unwrap()[0].log.clone();
+        let items = log.as_array().unwrap();
+        assert_eq!(items[0]["images"][0], "data:image/png;base64,QUJD");
+        assert_eq!(items[1]["revert"]["a.txt"], "before");
+        assert!(items[1]["revert"]["new.txt"].is_null(), "a created file stays null");
+        assert!(items[2].get("extra").is_none(), "a plain row gains no stray field");
     }
 
     #[test]
