@@ -23,6 +23,19 @@ const outputs = [
   { icon: "✓", label: "Commits", tint: "bg-periwinkle-mist" },
 ];
 
+/* what rides the wires — y is the svg height it enters or leaves at */
+const prompts = [
+  { text: "add dark mode", y: 20 },
+  { text: "fix the flaky test", y: 100 },
+  { text: "why is startup slow", y: 180 },
+];
+
+const results = [
+  { text: "3 files changed", y: 20 },
+  { text: "12 tests pass", y: 100 },
+  { text: "commit ready", y: 180 },
+];
+
 const features = [
   {
     icon: "▤",
@@ -135,10 +148,17 @@ const faqs = [
   },
 ];
 
-function Wash({ className }: { className?: string }) {
+function Wash({
+  className,
+  style,
+}: {
+  className?: string;
+  style?: React.CSSProperties;
+}) {
   return (
     <div
       aria-hidden
+      style={style}
       className={`pointer-events-none absolute -z-10 rounded-full blur-[75px] ${className}`}
     />
   );
@@ -180,26 +200,66 @@ function Swash() {
   );
 }
 
-/** A connector: the static line, plus a packet that travels it. */
-function Wire({
-  d,
-  stroke,
+/** One side of the pipeline. Each wire carries a chip of real text: the prompts
+    going in, the results coming back — each one entering or leaving at its own
+    height, riding its own curve. */
+function Rail({
+  dir,
+  chips,
   delay,
 }: {
-  d: string;
-  stroke: string;
+  dir: "in" | "out";
+  chips: { text: string; y: number }[];
   delay: number;
 }) {
+  const id = `flow-${dir}`;
+  const [from, to] =
+    dir === "in" ? ["#ff9473", "#a0b5eb"] : ["#a0b5eb", "#a7fccd"];
   return (
-    <g fill="none" stroke={stroke}>
-      <path d={d} opacity="0.3" />
-      <path
-        d={d}
-        pathLength={100}
-        className="flow"
-        style={{ "--d": `${delay}s` } as React.CSSProperties}
-      />
-    </g>
+    <div className="relative hidden h-[200px] w-full md:block">
+      <svg
+        viewBox="0 0 120 200"
+        preserveAspectRatio="none"
+        className="h-full w-full"
+        aria-hidden
+      >
+        <linearGradient id={id} x1="0" x2="1">
+          <stop offset="0" stopColor={from} />
+          <stop offset="1" stopColor={to} />
+        </linearGradient>
+        {chips.map((c) => (
+          <path
+            key={c.y}
+            d={
+              dir === "in"
+                ? `M0 ${c.y} C60 ${c.y} 60 100 120 100`
+                : `M0 100 C60 100 60 ${c.y} 120 ${c.y}`
+            }
+            fill="none"
+            stroke={`url(#${id})`}
+            opacity="0.35"
+          />
+        ))}
+      </svg>
+
+        {/* the box carries x and fade, the span carries y — the wire is a curve,
+          so the two axes need different easings */}
+      {chips.map((c, i) => (
+        <span
+          key={c.text}
+          className="ride"
+          style={
+            {
+              "--d": `${delay + i * 6}s`,
+              "--from": dir === "in" ? `${c.y - 100}px` : "0px",
+              "--to": dir === "in" ? "0px" : `${c.y - 100}px`,
+            } as React.CSSProperties
+          }
+        >
+          <span>{c.text}</span>
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -207,13 +267,18 @@ function Node({
   icon,
   label,
   tint,
+  delay,
 }: {
   icon: string;
   label: string;
   tint: string;
+  delay: number;
 }) {
   return (
-    <span className="tag">
+    <span
+      className="tag stage"
+      style={{ "--d": `${delay}s` } as React.CSSProperties}
+    >
       <span
         className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-pill text-caption ${tint}`}
       >
@@ -329,30 +394,12 @@ export default function Home() {
 
           <div className="reveal mt-12 grid items-center gap-8 sm:mt-20 md:grid-cols-[auto_1fr_auto_1fr_auto] md:gap-10">
             <div className="flex flex-col items-center gap-4 md:items-start md:gap-6">
-              {sources.map((s) => (
-                <Node key={s.label} {...s} />
+              {sources.map((s, i) => (
+                <Node key={s.label} {...s} delay={i * 0.15} />
               ))}
             </div>
 
-            <svg
-              viewBox="0 0 120 200"
-              preserveAspectRatio="none"
-              className="hidden h-[200px] w-full md:block"
-              aria-hidden
-            >
-              <linearGradient id="flow-in" x1="0" x2="1">
-                <stop offset="0" stopColor="#ff9473" />
-                <stop offset="1" stopColor="#a0b5eb" />
-              </linearGradient>
-              {[20, 100, 180].map((y, i) => (
-                <Wire
-                  key={y}
-                  d={`M0 ${y} C60 ${y} 60 100 120 100`}
-                  stroke="url(#flow-in)"
-                  delay={i * 0.55}
-                />
-              ))}
-            </svg>
+            <Rail dir="in" chips={prompts} delay={0.4} />
 
             {/* mobile connectors — the curves only make sense side by side */}
             <div
@@ -361,12 +408,41 @@ export default function Home() {
             />
 
             <div className="relative mx-auto">
-              <Wash className="breathe inset-0 m-auto h-40 w-40 bg-mint opacity-70" />
-              <div className="flex h-36 w-36 flex-col items-center justify-center gap-2 rounded-pill border border-ash bg-parchment text-center sm:h-40 sm:w-40">
+              <Wash
+                className="breathe inset-0 m-auto h-40 w-40 bg-mint opacity-70"
+                style={{ "--d": "1.95s" } as React.CSSProperties}
+              />
+              <div
+                className="think flex h-36 w-36 flex-col items-center justify-center gap-2 rounded-pill border border-ash bg-parchment text-center sm:h-40 sm:w-40"
+                style={{ "--d": "1.95s" } as React.CSSProperties}
+              >
                 <Logo size={26} />
                 <span className="text-caption uppercase">Loom agent</span>
-                <span className="text-caption uppercase text-smoke">
-                  sandboxed
+                <span className="relative block h-4 w-full text-caption uppercase text-smoke">
+                  <span
+                    className="status"
+                    style={{ "--d": "2.15s" } as React.CSSProperties}
+                  >
+                    reading files
+                  </span>
+                  <span
+                    className="status"
+                    style={{ "--d": "2.65s" } as React.CSSProperties}
+                  >
+                    running tests
+                  </span>
+                  <span
+                    className="status"
+                    style={{ "--d": "3.15s" } as React.CSSProperties}
+                  >
+                    writing diff
+                  </span>
+                  <span
+                    className="idle"
+                    style={{ "--d": "2.15s" } as React.CSSProperties}
+                  >
+                    sandboxed
+                  </span>
                 </span>
               </div>
             </div>
@@ -376,29 +452,11 @@ export default function Home() {
               className="mx-auto h-10 w-px bg-linear-to-b from-sky-blue to-mint md:hidden"
             />
 
-            <svg
-              viewBox="0 0 120 200"
-              preserveAspectRatio="none"
-              className="hidden h-[200px] w-full md:block"
-              aria-hidden
-            >
-              <linearGradient id="flow-out" x1="0" x2="1">
-                <stop offset="0" stopColor="#a0b5eb" />
-                <stop offset="1" stopColor="#a7fccd" />
-              </linearGradient>
-              {[20, 100, 180].map((y, i) => (
-                <Wire
-                  key={y}
-                  d={`M0 100 C60 100 60 ${y} 120 ${y}`}
-                  stroke="url(#flow-out)"
-                  delay={1.3 + i * 0.55}
-                />
-              ))}
-            </svg>
+            <Rail dir="out" chips={results} delay={3.6} />
 
             <div className="flex flex-col items-center gap-4 md:items-end md:gap-6">
-              {outputs.map((o) => (
-                <Node key={o.label} {...o} />
+              {outputs.map((o, i) => (
+                <Node key={o.label} {...o} delay={4.85 + i * 0.2} />
               ))}
             </div>
           </div>

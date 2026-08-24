@@ -1842,6 +1842,8 @@ body.dragging-col {
 .copy-btn:active { transform: scale(0.96); }
 /* Confirmation state, shared by Copied and while a reply is being read out. */
 .copy-btn.ok { color: var(--accent-hi); border-color: transparent; background: var(--accent-soft); }
+/* Armed undo: it is about to rewrite files, so it should not look like Copy. */
+.copy-btn.warn { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 .copy-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .copy-float {
   position: absolute;

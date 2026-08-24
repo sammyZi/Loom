@@ -65,7 +65,7 @@ pub struct ToolCtx {
     /// them starts with a fresh context and would otherwise re-read the same
     /// files: one task re-read fifteen files three times over for ~30k tokens
     /// of pure duplication.
-    pub reads: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    pub reads: Arc<std::sync::Mutex<HashMap<String, (u64, u32)>>>,
     /// Paths written this task, so "done" can be told from "changed nothing".
     pub writes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Bytes of file content handed over this task. Telling the model to read
@@ -937,22 +937,44 @@ impl Tool for ReadFile {
             return Ok(slice_lines(&raw, offset, limit));
         }
         let hash = content_hash(&raw);
-        let seen = {
+        // Repeats are counted, not merely detected. A model that ignores the
+        // pointer asks again, and every ask costs a turn: runs were spending
+        // their whole budget re-reading the same handful of files without ever
+        // reaching the work, which reads to the user as a hang.
+        let repeats = {
             let mut reads = ctx.reads.lock().unwrap();
-            reads.insert(path.to_string(), hash) == Some(hash)
+            match reads.get(path).copied() {
+                Some((h, n)) if h == hash => {
+                    reads.insert(path.to_string(), (hash, n + 1));
+                    n + 1
+                }
+                _ => {
+                    reads.insert(path.to_string(), (hash, 0));
+                    0
+                }
+            }
         };
         tracing::info!(
             "read_file {path}: {} ({} bytes)",
-            if seen { "CACHED" } else { "full" },
+            if repeats > 0 { "CACHED" } else { "full" },
             raw.len()
         );
-        if seen {
-            return Ok(format!(
-                "{path} is unchanged since it was read earlier in this task ({} lines) — its \
-                 contents are already above. Do not read it again; use search_files to find a \
-                 detail, or read_file with offset/limit for one region.",
-                raw.lines().count()
-            ));
+        if repeats > 0 {
+            let lines = raw.lines().count();
+            return Ok(if repeats >= 3 {
+                format!(
+                    "STOP — you have asked for {path} {repeats} times and it has not changed \
+                     ({lines} lines). Its contents are already in this conversation. Reading it \
+                     again cannot tell you anything new and is spending the turns you have left. \
+                     Act now: make the edit, or reply with your result."
+                )
+            } else {
+                format!(
+                    "{path} is unchanged since it was read earlier in this task ({lines} lines) — \
+                     its contents are already above. Do not read it again; use search_files to \
+                     find a detail, or read_file with offset/limit for one region."
+                )
+            });
         }
         // Cached repeats are free; only new content spends the budget. Checked
         // before adding, so the read that would *cross* the line is the one
@@ -2125,6 +2147,41 @@ mod tool_tests {
             .await
             .unwrap();
         assert!(sliced.contains("hello"), "{sliced}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The hang the user saw: a model that ignores the pointer keeps asking,
+    /// each ask costs a turn, and the run spends its whole budget reading. The
+    /// answer has to get firmer, not just repeat itself.
+    #[tokio::test]
+    async fn asking_for_the_same_file_over_and_over_escalates() {
+        let root = std::env::temp_dir().join("ide-ai-read-loop-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "hello
+world
+").unwrap();
+        let ctx = test_ctx(&root);
+        let cancel = CancellationToken::new();
+        let arg = json!({ "path": "a.txt" });
+
+        let mut out = String::new();
+        for _ in 0..5 {
+            out = ReadFile.call(&ctx, arg.clone(), &cancel).await.unwrap();
+        }
+        assert!(out.contains("STOP"), "a read loop must be called out: {out}");
+        assert!(out.contains("4 times"), "and counted: {out}");
+        assert!(!out.contains("hello"), "still must not resend the file: {out}");
+
+        // Editing it resets the count: the next read is legitimate again.
+        std::fs::write(root.join("a.txt"), "hello
+there
+").unwrap();
+        let after = ReadFile.call(&ctx, arg.clone(), &cancel).await.unwrap();
+        assert!(after.contains("there"), "changed content is served: {after}");
+        let again = ReadFile.call(&ctx, arg, &cancel).await.unwrap();
+        assert!(!again.contains("STOP"), "count restarts after a change: {again}");
 
         std::fs::remove_dir_all(&root).ok();
     }

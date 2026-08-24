@@ -258,33 +258,213 @@ button:hover > .arrow {
   }
 }
 
-/* pipeline — packets travelling the connectors, wash breathing behind the agent */
+/* pipeline — one 6s loop: prompts ride in from three heights, the agent works
+   out loud, results ride back out. Every step shares the 6s period;
+   animation-delay is the phase, so each keyframe track's slice is its moment. */
 @media (prefers-reduced-motion: no-preference) {
-  .flow {
-    stroke-dasharray: 14 86;
-    animation: flow 2.6s linear infinite;
+  .stage,
+  .think,
+  .breathe,
+  .ride,
+  .ride > span,
+  .status,
+  .idle {
+    animation-duration: 6s;
+    animation-iteration-count: infinite;
     animation-delay: var(--d, 0s);
+    /* backwards: hold the 0% frame through the delay, so a chip waiting its
+       turn is invisible instead of parked at the start of its wire */
+    animation-fill-mode: backwards;
+  }
+  .stage {
+    animation-name: stage;
+    animation-timing-function: ease-out;
+  }
+  .think {
+    animation-name: think;
+    animation-timing-function: ease-in-out;
   }
   .breathe {
-    animation: breathe 5s ease-in-out infinite;
+    animation-name: breathe;
+    animation-timing-function: ease-in-out;
+  }
+  /* 18s = three 6s acts, and a chip only rides in its own act, so exactly one
+     prompt is ever in flight. 18 is a multiple of 6, so the rest stays in phase. */
+  .ride,
+  .ride > span {
+    animation-duration: 18s;
+  }
+  .ride {
+    animation-name: ride;
+    animation-timing-function: linear;
+  }
+  .ride > span {
+    animation-name: arc;
+    /* control points at the midpoint — the same shape the wire is drawn with */
+    animation-timing-function: cubic-bezier(0.5, 0, 0.5, 1);
+  }
+  .status {
+    animation-name: status;
+  }
+  .idle {
+    animation-name: idle;
   }
 }
-@keyframes flow {
-  from {
-    stroke-dashoffset: 100;
+
+/* A chip of text riding a wire. The outer box is just a moving point — width 0,
+   full height — and the pill hangs off it, because the pill is what has to
+   climb: with the y on the inner element only, the text slid around inside a
+   box that never left the centre line. */
+.ride {
+  position: absolute;
+  top: 0;
+  left: 6%;
+  height: 100%;
+  width: 0;
+  opacity: 0;
+}
+.ride > span {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  transform: translate(-50%, -50%) translateY(var(--from));
+  white-space: nowrap;
+  border: 1px solid var(--color-ash);
+  border-radius: var(--radius-pill);
+  background: var(--color-parchment);
+  padding: 0.4rem 0.8rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  letter-spacing: -0.033em;
+  text-transform: uppercase;
+  color: var(--color-off-black);
+  box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.35);
+}
+/* x and fade — 1.3s of travel, then out of the way for the rest of the loop */
+@keyframes ride {
+  0% {
+    left: 6%;
+    opacity: 0;
   }
-  to {
-    stroke-dashoffset: 0;
+  1% {
+    opacity: 1;
+  }
+  6.3% {
+    opacity: 1;
+  }
+  7.3% {
+    left: 94%;
+    opacity: 0;
+  }
+  100% {
+    left: 94%;
+    opacity: 0;
   }
 }
+/* y — eased separately so the chip tracks the curve of its wire */
+@keyframes arc {
+  0% {
+    transform: translate(-50%, -50%) translateY(var(--from));
+  }
+  7.3%,
+  100% {
+    transform: translate(-50%, -50%) translateY(var(--to));
+  }
+}
+
+/* a tag taking its turn — lifts, darkens its edge, settles */
+@keyframes stage {
+  0%,
+  100% {
+    transform: none;
+    border-color: var(--color-ash);
+    box-shadow: 0 0 0 0 rgb(0 0 0 / 0);
+  }
+  4% {
+    transform: translateY(-3px);
+    border-color: var(--color-smoke);
+    box-shadow: 0 6px 20px -8px rgb(0 0 0 / 0.28);
+  }
+  16% {
+    transform: none;
+    border-color: var(--color-ash);
+    box-shadow: 0 0 0 0 rgb(0 0 0 / 0);
+  }
+}
+
+/* the agent working: two beats, then release */
+@keyframes think {
+  0%,
+  100% {
+    transform: scale(1);
+    border-color: var(--color-ash);
+  }
+  4% {
+    transform: scale(1.045);
+    border-color: var(--color-smoke);
+  }
+  8% {
+    transform: scale(1.02);
+  }
+  12% {
+    transform: scale(1.05);
+    border-color: var(--color-smoke);
+  }
+  20% {
+    transform: scale(1);
+    border-color: var(--color-ash);
+  }
+}
+
 @keyframes breathe {
   0%,
   100% {
     transform: scale(1);
-    opacity: 0.55;
+    opacity: 0.5;
   }
-  50% {
-    transform: scale(1.12);
-    opacity: 0.85;
+  10% {
+    transform: scale(1.18);
+    opacity: 0.9;
+  }
+  24% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+}
+
+/* what the agent says it is doing, one line at a time. The lines are stacked in
+   the same box, so each has to be fully gone before the next arrives: visible
+   0.06s-0.42s of its own slice, and the delays are 0.5s apart. */
+.status,
+.idle {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+}
+.status {
+  opacity: 0;
+}
+@keyframes status {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  1%,
+  7% {
+    opacity: 1;
+  }
+  8% {
+    opacity: 0;
+  }
+}
+@keyframes idle {
+  0%,
+  30%,
+  100% {
+    opacity: 1;
+  }
+  2%,
+  28% {
+    opacity: 0;
   }
 }

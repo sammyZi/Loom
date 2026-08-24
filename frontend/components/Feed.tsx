@@ -4,7 +4,7 @@ import { IconMark, IconUndo } from "@/components/Icons";
 import { CopyButton, Markdown, SpeakButton } from "@/components/Markdown";
 import type { TodoItem } from "@/lib/api";
 import { groupLog, secs, type LogItem } from "@/lib/log";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function Feed({
   prompt,
@@ -17,6 +17,7 @@ export function Feed({
   pending,
   onDecide,
   onRevert,
+  onRevertTurn,
 }: {
   prompt: string;
   log: LogItem[];
@@ -31,6 +32,8 @@ export function Feed({
   onDecide?: (allow: boolean) => void;
   /** Undo the files a reply changed, back to how this run found them. */
   onRevert?: (item: LogItem) => void;
+  /** Undo every file the reply to one sent message touched. */
+  onRevertTurn?: (item: LogItem) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -88,7 +91,19 @@ export function Feed({
           return "items" in g ? (
             <ToolLine key={i} items={g.items} running={busy && last} />
           ) : (
-            <Message key={i} item={g} live={busy && last} onRevert={onRevert} />
+            <Message
+              key={i}
+              item={g}
+              live={busy && last}
+              onRevert={onRevert}
+              onRevertTurn={onRevertTurn}
+              canUndo={g.kind === "user" && turnUndo(log, g).count > 0}
+              undoTitle={
+                g.kind === "user"
+                  ? `Undo this message: put ${turnUndo(log, g).count} file(s) back to how they were before it`
+                  : undefined
+              }
+            />
           );
         })}
 
@@ -178,10 +193,17 @@ function Message({
   item,
   live,
   onRevert,
+  onRevertTurn,
+  canUndo = false,
+  undoTitle,
 }: {
   item: LogItem;
   live: boolean;
   onRevert?: (item: LogItem) => void;
+  /** Undo every file the reply to this message touched. */
+  onRevertTurn?: (item: LogItem) => void;
+  canUndo?: boolean;
+  undoTitle?: string;
 }) {
   if (item.kind === "user") {
     return (
@@ -205,6 +227,7 @@ function Message({
         </div>
         <div className="user-actions">
           <CopyButton text={item.text} />
+          {onRevertTurn && canUndo && <UndoButton onConfirm={() => onRevertTurn(item)} label="Undo this" title={undoTitle} />}
         </div>
       </div>
     );
@@ -249,19 +272,11 @@ function Message({
             <CopyButton text={item.text} />
             <SpeakButton text={item.text} />
             {item.revert && Object.keys(item.revert).length > 0 && (
-              <button
-                className={`copy-btn ${item.reverted ? "ok" : ""}`}
-                onClick={() => onRevert?.(item)}
-                disabled={item.reverted}
-                title={
-                  item.reverted
-                    ? "Already undone"
-                    : `Undo: put ${Object.keys(item.revert).length} file(s) back to before this reply`
-                }
-              >
-                <IconUndo />
-                <span>{item.reverted ? "Undone" : "Undo"}</span>
-              </button>
+              <UndoButton
+                onConfirm={() => onRevert?.(item)}
+                done={item.reverted}
+                title={`Undo: put ${Object.keys(item.revert).length} file(s) back to before this reply`}
+              />
             )}
           </div>
         )}
@@ -269,6 +284,74 @@ function Message({
     );
   }
   return <div className={`event ${item.kind}`}>{item.text}</div>;
+}
+
+/**
+ * The files one turn touched: every reply between this sent message and the
+ * next one, minus anything already put back. One message, one undo.
+ */
+export function turnUndo(
+  log: LogItem[],
+  user: LogItem,
+): { files: Record<string, string | null>; count: number } {
+  const start = log.indexOf(user);
+  // null is "this file did not exist before the turn" — undo deletes it.
+  const files: Record<string, string | null> = {};
+  if (start < 0) return { files, count: 0 };
+  for (let i = start + 1; i < log.length; i++) {
+    const it = log[i];
+    if (it.kind === "user") break;
+    if (it.reverted || !it.revert) continue;
+    // Earliest snapshot wins: undoing a turn means going back to before it,
+    // not to some midpoint between two replies inside it.
+    for (const [path, before] of Object.entries(it.revert)) {
+      if (!(path in files)) files[path] = before;
+    }
+  }
+  return { files, count: Object.keys(files).length };
+}
+
+/**
+ * Undo is destructive — it rewrites files on disk — so it asks first, using the
+ * same click-again pattern as "Clear all sessions" rather than a modal. The arm
+ * lapses after a few seconds so a stray click cannot sit there waiting to fire.
+ */
+function UndoButton({
+  onConfirm,
+  done = false,
+  title,
+  label = "Undo",
+}: {
+  onConfirm: () => void;
+  done?: boolean;
+  title?: string;
+  label?: string;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  if (done) {
+    return (
+      <button className="copy-btn ok" disabled title="Already undone">
+        <IconUndo />
+        <span>Undone</span>
+      </button>
+    );
+  }
+  return (
+    <button
+      className={`copy-btn ${armed ? "warn" : ""}`}
+      onClick={() => (armed ? (setArmed(false), onConfirm()) : setArmed(true))}
+      title={armed ? "Click again to restore those files" : title}
+    >
+      <IconUndo />
+      <span>{armed ? "Click again to undo" : label}</span>
+    </button>
+  );
 }
 
 function ToolLine({ items, running }: { items: LogItem[]; running: boolean }) {

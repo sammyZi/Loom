@@ -4,7 +4,7 @@ import { Composer, type SubmitMeta } from "@/components/Composer";
 import { BrowserPanel } from "@/components/BrowserPanel";
 import { ContextBar, type Git } from "@/components/ContextBar";
 import { DiffPanel } from "@/components/DiffPanel";
-import { Feed } from "@/components/Feed";
+import { Feed, turnUndo } from "@/components/Feed";
 import { IconClose, IconPlay, IconTrash } from "@/components/Icons";
 import { SettingsModal } from "@/components/SettingsModal";
 import { Sidebar, buildGroups, normPath } from "@/components/Sidebar";
@@ -654,6 +654,42 @@ export default function Page() {
   /** Undo one reply's changes: puts every file it touched back to how this
    *  run found it. `agent_revert` writes straight to disk and does not run
    *  through the agent event guard, so the panels are refreshed by hand. */
+  /**
+   * Undo a whole turn: the files every reply to this sent message touched,
+   * back to how they were before it. The replies are then marked undone so
+   * their own Undo buttons cannot put back a midpoint on top of this.
+   */
+  async function revertTurn(user: LogItem) {
+    const { files, count } = turnUndo(log, user);
+    if (!count) return;
+    setErr("");
+    try {
+      const res = await api.revertFiles(files);
+      if (!res.ok) setErr(`Undo failed for: ${res.failed.join(", ")}`);
+      const start = log.indexOf(user);
+      const updated = log.map((l, i) => {
+        if (i <= start || l.kind === "user") return l;
+        const before = log.slice(start + 1, i).some((x) => x.kind === "user");
+        return before || !l.revert ? l : { ...l, reverted: true };
+      });
+      setLog(updated);
+      if (sessionId && sessionFolder) {
+        saveSession({
+          id: sessionId,
+          folder: sessionFolder,
+          title: promptShown || "Untitled",
+          log: updated,
+          at: Date.now(),
+        })
+          .then(reloadSessions)
+          .catch(() => {});
+      }
+      await refresh();
+    } catch (e) {
+      setErr(errText(e));
+    }
+  }
+
   async function revertMessage(item: LogItem) {
     if (!item.revert || item.reverted) return;
     setErr("");
@@ -798,6 +834,7 @@ export default function Page() {
             pending={pendingAsk}
             onDecide={decideAsk}
             onRevert={revertMessage}
+            onRevertTurn={revertTurn}
           />
 
           <div className="composer-wrap">

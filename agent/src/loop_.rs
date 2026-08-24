@@ -24,7 +24,7 @@ pub struct RunEnv {
     pub settings: Settings,
     /// Files already handed to the model this task. Shared by every role so the
     /// coder does not re-read what the planner just read.
-    pub reads: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+    pub reads: Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u32)>>>,
     /// Paths this task actually wrote. Lets the pipeline tell "done" apart from
     /// "talked about it and changed nothing".
     pub writes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
