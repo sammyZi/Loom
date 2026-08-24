@@ -1,4 +1,6 @@
 /target
+/.next
+**/*.tsbuildinfo
 /frontend/node_modules
 /frontend/.next
 /frontend/out
@@ -8,7 +10,7 @@
 **/*.pdb
 .idea
 .vscode
-/.opencode/plans
+/.opencode
 .env
 .env.*
 !.env.example
