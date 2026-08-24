@@ -41,7 +41,6 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /** Placeholder name until the first message supplies a real one. */
-const NEW_CHAT_TITLE = "New chat";
 
 const MODEL_KEY = "ide-ai-model";
 const SIDE_KEY = "ide-ai-side";
@@ -154,6 +153,8 @@ export default function Page() {
   // another window (or by a script hitting the API) used to drive this feed and
   // flip it to "working" with no prompt from the user. Only follow our own run.
   const myRun = useRef(false);
+  /** True while a folder open is in flight; keeps re-entry from looping. */
+  const opening = useRef(false);
   const exact = useRef(0);
   const streamed = useRef(0);
   const live = useRef({ sessionId, promptShown, log, sessionFolder });
@@ -459,14 +460,12 @@ export default function Page() {
     setErr("");
     if (sessionId && log.length === 0) return;
 
-    const dir = forFolder ?? folder;
-    const id = newSessionId();
-    setSessionId(id);
-    setSessionFolder(dir);
-    if (!dir) return;
-    saveSession({ id, folder: dir, title: NEW_CHAT_TITLE, log: [], at: Date.now() })
-      .then(reloadSessions)
-      .catch(() => {});
+    // The id exists only in memory until there is something to save. Writing a
+    // blank "New chat" row on every folder switch is what filled the sidebar
+    // (and the database) with empty sessions; run() persists this same id the
+    // moment the user actually sends something.
+    setSessionId(newSessionId());
+    setSessionFolder(forFolder ?? folder);
   }
 
   async function pick() {
@@ -485,6 +484,8 @@ export default function Page() {
   }
 
   async function openRecent(path: string, sessionId?: string) {
+    if (opening.current) return;
+    opening.current = true;
     setErr("");
     try {
       const wasOpen = normPath(path) === normPath(folder ?? "");
@@ -499,18 +500,26 @@ export default function Page() {
       if (sessionId) {
         const all = await loadAllSessions();
         const s = all.find((x) => x.id === sessionId);
-        if (s && s.folder === path) loadSession(s);
+        if (s && s.folder === path) loadSession(s, path);
       }
     } catch (e) {
       setErr(errText(e));
+    } finally {
+      opening.current = false;
     }
   }
 
   /** Load a stored transcript into the chat. Guarded against mid-run swaps:
    *  detaching from a live run used to merge two transcripts into one log. */
-  function loadSession(s: Session) {
+  function loadSession(s: Session, openedFolder?: string) {
     if (busy) return;
-    if (normPath(s.folder) !== normPath(folder ?? "")) {
+    // `openedFolder` is the folder the caller has just opened. Without it this
+    // compared against the `folder` state captured when the closure was made —
+    // still the old value during an open — so loadSession bounced straight
+    // back into openRecent, which opened the folder again, and the two ping-
+    // ponged at round-trip speed.
+    const current = openedFolder ?? folder ?? "";
+    if (normPath(s.folder) !== normPath(current)) {
       void openRecent(s.folder, s.id);
       return;
     }

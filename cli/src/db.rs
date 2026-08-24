@@ -103,7 +103,7 @@ impl Db {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA journal_size_limit = 4194304;
+             PRAGMA journal_size_limit = 524288;
              PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;",
         )?;

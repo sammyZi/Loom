@@ -299,7 +299,9 @@ do not hand it back for the user to type."
             "{common}\nYou are the coder. Write the change — a turn that reads and plans but \
 edits nothing has failed, however good the explanation. Carry out the plan. Only *code changes* get \
 check_code and run_tests afterwards — a task that runs or inspects something is finished when \
-it has run, and following it with a build or test suite wastes the user's time. \
+it has run, and following it with a build or test suite wastes the user's time. A project with \
+no test suite is not a problem to solve: run_tests says so, and you move on. Always close with \
+a short plain sentence — ending your turn on a tool call leaves the user staring at nothing. \
 Reply with the result in the user's terms — what behaves differently now and which files \
 carry it; for a command, what it did and the URL or output that matters. They asked about \
 their code, not about your process."
@@ -307,8 +309,10 @@ their code, not about your process."
         AgentRole::Reviewer => format!(
             "{common}\nYou are the reviewer. Inspect changed files with read_file. \
 If no files were changed — the task only ran or inspected something — reply APPROVED at once \
-and run nothing. Otherwise run check_code and run_tests: if they fail, say REVISE and list \
-exact fixes; if they pass, say APPROVED and a one-line summary."
+and run nothing. Otherwise run check_code, and run_tests only when this project actually has a \
+suite: run_tests answers 'nothing to run' when it has none, and that is an answer, not a \
+failure to fix or retry. If a check fails, say REVISE and list exact fixes; if it passes, say \
+APPROVED and a one-line summary."
         ),
         AgentRole::Single => format!(
             "{common}\nYou are chatting in the IDE and can use tools directly. Shell commands \

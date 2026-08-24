@@ -75,11 +75,18 @@ export function CopyButton({ text, label = "Copy" }: { text: string; label?: str
  */
 export function SpeakButton({ text, label = "Listen" }: { text: string; label?: string }) {
   const [speaking, setSpeaking] = useState(false);
+  const [voiceName, setVoiceName] = useState("");
   const supported = typeof window !== "undefined" && "speechSynthesis" in window;
 
   // Speech outlives the component, so a reply that scrolls away (or a reload)
   // would otherwise keep talking with no way to stop it.
   useEffect(() => () => window.speechSynthesis?.cancel(), []);
+
+  // Touching getVoices() early starts the engine loading its list, so the
+  // first click has something to rank instead of racing it.
+  useEffect(() => {
+    window.speechSynthesis?.getVoices();
+  }, []);
 
   if (!supported) return null;
 
@@ -103,6 +110,7 @@ export function SpeakButton({ text, label = "Listen" }: { text: string; label?: 
     // nothing to rank, u.voice stayed unset, and the engine's own fallback
     // (Microsoft David on Windows) is the flattest voice available.
     const voice = humanVoice(await voicesReady(synth));
+    setVoiceName(voice?.name ?? "");
     parts.forEach((part, i) => {
       const u = new SpeechSynthesisUtterance(part.trim());
       if (voice) u.voice = voice;
@@ -121,7 +129,13 @@ export function SpeakButton({ text, label = "Listen" }: { text: string; label?: 
     <button
       className={`copy-btn ${speaking ? "ok" : ""}`}
       onClick={toggle}
-      title={speaking ? "Stop reading" : "Read this reply aloud"}
+      title={
+        speaking
+          ? "Stop reading"
+          : voiceName
+            ? `Read this reply aloud (${voiceName})`
+            : "Read this reply aloud"
+      }
       aria-label={speaking ? "Stop reading" : "Read this reply aloud"}
     >
       {speaking ? <IconSpeakOff /> : <IconSpeak />}
@@ -140,9 +154,26 @@ function voicesReady(synth: SpeechSynthesis): Promise<SpeechSynthesisVoice[]> {
   const now = synth.getVoices();
   if (now.length) return Promise.resolve(now);
   return new Promise((resolve) => {
-    const done = () => resolve(synth.getVoices());
-    synth.addEventListener("voiceschanged", done, { once: true });
-    setTimeout(done, 300);
+    let tries = 0;
+    let poll: ReturnType<typeof setInterval>;
+    const finish = (v: SpeechSynthesisVoice[]) => {
+      clearInterval(poll);
+      synth.removeEventListener("voiceschanged", onChange);
+      resolve(v);
+    };
+    function onChange() {
+      const v = synth.getVoices();
+      if (v.length) finish(v);
+    }
+    // A single 300 ms deadline was not always enough in WebView2: the list
+    // came back empty, no voice got set, and the engine used its own default —
+    // David on Windows, i.e. male, whatever the ranking below preferred. Poll
+    // for up to two seconds instead of betting on one timeout.
+    poll = setInterval(() => {
+      const v = synth.getVoices();
+      if (v.length || ++tries >= 20) finish(v);
+    }, 100);
+    synth.addEventListener("voiceschanged", onChange);
   });
 }
 

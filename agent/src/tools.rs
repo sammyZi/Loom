@@ -1766,6 +1766,45 @@ impl Tool for CheckCode {
     }
 }
 
+/// `Some(reason)` when the project plainly has no suite to run, so the caller
+/// can say so instead of starting a runner that will fail for want of tests.
+/// Only claims "no tests" on evidence; anything ambiguous runs as before.
+fn no_test_suite(ws: &ide_core::WorkspaceRoot, stack: crate::project::Stack) -> Option<String> {
+    use crate::project::Stack;
+    let root = ws.root();
+    match stack {
+        Stack::Node => {
+            let pkg = std::fs::read_to_string(root.join("package.json")).ok()?;
+            let json: Value = serde_json::from_str(&pkg).ok()?;
+            // A missing `scripts` object means no test script — the `?` here
+            // used to bail out of the whole check and run the runner anyway.
+            let script = json
+                .get("scripts")
+                .and_then(|s| s.get("test"))
+                .and_then(|v| v.as_str());
+            match script {
+                // `npm init` writes this placeholder; it is not a test suite.
+                None => Some("this project has no test script in package.json — nothing to run".into()),
+                Some(s) if s.contains("no test specified") => {
+                    Some("package.json still has npm's placeholder test script — no suite to run".into())
+                }
+                Some(_) => None,
+            }
+        }
+        Stack::Python => {
+            let has = root.join("tests").is_dir()
+                || root.join("pytest.ini").exists()
+                || root.join("conftest.py").exists()
+                || std::fs::read_dir(root).ok()?.flatten().any(|e| {
+                    e.file_name().to_string_lossy().starts_with("test_")
+                });
+            (!has).then(|| "no tests directory or test_*.py in this project — nothing to run".into())
+        }
+        // cargo and go both handle an empty suite sensibly and cheaply.
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl Tool for RunTests {
     fn name(&self) -> &'static str {
@@ -1783,7 +1822,15 @@ impl Tool for RunTests {
             anyhow::bail!("cancelled");
         }
         use crate::project::Stack;
-        let (program, args): (&str, Vec<String>) = match Stack::detect(&ctx.ws) {
+        let stack = Stack::detect(&ctx.ws);
+        // Ask the project whether it has tests before paying to start a runner.
+        // `npm test` in a package with no test script burns a process and comes
+        // back "exit 1, no output" on every single run, which reads like a
+        // failure and taught nobody anything.
+        if let Some(why) = no_test_suite(&ctx.ws, stack) {
+            return Ok(why);
+        }
+        let (program, args): (&str, Vec<String>) = match stack {
             Stack::Cargo => ("cargo", vec!["test".into()]),
             Stack::Node => ("npm", vec!["test".into(), "--silent".into()]),
             Stack::Go => ("go", vec!["test".into(), "./...".into()]),
@@ -1836,6 +1883,44 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
 #[cfg(test)]
 mod tool_tests {
     use super::*;
+
+    fn tmp_ws(name: &str) -> ide_core::WorkspaceRoot {
+        let d = std::env::temp_dir().join(format!("ide-ai-tests-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        ide_core::WorkspaceRoot::open(&d).unwrap()
+    }
+
+    #[test]
+    fn node_without_a_test_script_is_not_run() {
+        let ws = tmp_ws("node-none");
+        std::fs::write(ws.root().join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let why = no_test_suite(&ws, crate::project::Stack::Node);
+        assert!(why.is_some(), "a package with no test script must be skipped");
+    }
+
+    #[test]
+    fn npm_placeholder_script_is_not_a_suite() {
+        let ws = tmp_ws("node-placeholder");
+        let pkg = r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#;
+        std::fs::write(ws.root().join("package.json"), pkg).unwrap();
+        assert!(no_test_suite(&ws, crate::project::Stack::Node).is_some());
+    }
+
+    #[test]
+    fn a_real_test_script_still_runs() {
+        let ws = tmp_ws("node-real");
+        std::fs::write(ws.root().join("package.json"), r#"{"scripts":{"test":"vitest run"}}"#).unwrap();
+        assert!(no_test_suite(&ws, crate::project::Stack::Node).is_none());
+    }
+
+    #[test]
+    fn python_needs_visible_tests() {
+        let ws = tmp_ws("py");
+        assert!(no_test_suite(&ws, crate::project::Stack::Python).is_some());
+        std::fs::create_dir_all(ws.root().join("tests")).unwrap();
+        assert!(no_test_suite(&ws, crate::project::Stack::Python).is_none());
+    }
 
     #[test]
     fn read_slices_are_numbered_and_say_what_is_left() {

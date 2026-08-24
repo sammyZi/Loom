@@ -236,8 +236,12 @@ pub async fn run_task(
             // quotes and its file-by-file notes answer nothing the user asked
             // for, so a passing review ends the run silently and the coder's
             // summary — the one that describes the change — is what ships.
-            let _ = env.events.send(AgentEvent::Done { summary: last.clone() });
-            return Ok(last);
+            // A coder that ran out of turns mid-tool-call leaves no closing
+            // text at all, and an empty bubble tells the user nothing about
+            // work that did happen; name the files in that case.
+            let summary = non_empty(&last, &changed);
+            let _ = env.events.send(AgentEvent::Done { summary: summary.clone() });
+            return Ok(summary);
         }
         last = review.clone();
         // A REVISE round that changed nothing will not change anything next
@@ -258,6 +262,19 @@ pub async fn run_task(
     }
     let _ = env.events.send(AgentEvent::Done { summary: last.clone() });
     Ok(last)
+}
+
+/// The coder's own words when it left any, otherwise the shortest honest
+/// account of the run: what it changed.
+fn non_empty(summary: &str, changed: &str) -> String {
+    if !summary.trim().is_empty() {
+        return summary.to_string();
+    }
+    if changed.trim().is_empty() {
+        return "Done — no files changed.".into();
+    }
+    format!("Done. Files changed:
+{changed}")
 }
 
 /// Strict small-talk detection. The old "≤3 words starting with hi/hello/hey"
