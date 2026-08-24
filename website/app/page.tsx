@@ -217,22 +217,21 @@ export default function Home() {
             className="rise mx-auto max-w-5xl font-serif text-[36px] leading-[1.15] tracking-[-0.02em] sm:text-[60px] lg:text-[72px]"
             style={{ "--d": "0.08s" } as React.CSSProperties}
           >
-            Your agent runs on{" "}
+            There is{" "}
             <span className="mark">
-              your machine
+              no server
               <Swash />
             </span>
             .
             <br />
-            <span className="text-graphite">Not in the cloud.</span>
+            <span className="text-graphite">Just your folder.</span>
           </h1>
           <p
             className="rise mx-auto mt-6 max-w-2xl text-body text-graphite sm:mt-8 sm:text-body-lg"
             style={{ "--d": "0.16s" } as React.CSSProperties}
           >
-            Loom is a coding agent with an IDE around it. Open a folder and it
-            works in that folder — reading, writing, running commands, reporting
-            what changed. No accounts, no sync, no telemetry.
+            A coding agent with an IDE around it. One binary, your keys, your
+            machine.
           </p>
           <div
             className="rise mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row sm:gap-4"
@@ -254,7 +253,7 @@ export default function Home() {
             className="rise mt-5 text-caption uppercase text-smoke"
             style={{ "--d": "0.3s" } as React.CSSProperties}
           >
-            local-first · your keys · MIT licensed
+            one binary · windows · MIT licensed
           </p>
 
           {/* product shot */}
