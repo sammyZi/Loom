@@ -22,9 +22,6 @@ pub struct RunEnv {
     pub shells: ShellRegistry,
     pub cancel: CancellationToken,
     pub settings: Settings,
-    /// Files already handed to the model this task. Shared by every role so the
-    /// coder does not re-read what the planner just read.
-    pub reads: Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, u32)>>>,
     /// Paths this task actually wrote. Lets the pipeline tell "done" apart from
     /// "talked about it and changed nothing".
     pub writes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -73,7 +70,13 @@ pub async fn run_agent(
         perm,
         perms,
         spawn_subagent,
-        reads: env.reads.clone(),
+        // One cache per conversation, not per task. It used to be shared by
+        // every role "so the coder does not re-read what the planner just
+        // read" — but each role runs its own conversation, so the planner's
+        // file contents were never in front of the coder. It was told the
+        // contents were already above, they were not, and it either re-read in
+        // a loop or gave up and wrote nothing.
+        reads: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         writes: env.writes.clone(),
         read_budget: env.read_budget.clone(),
         before: env.before.clone(),
@@ -297,7 +300,11 @@ do not hand it back for the user to type."
         ),
         AgentRole::Coder => format!(
             "{common}\nYou are the coder. Write the change — a turn that reads and plans but \
-edits nothing has failed, however good the explanation. Carry out the plan. Only *code changes* get \
+edits nothing has failed, however good the explanation. File contents never belong in your \
+reasoning or your reply: the moment you know what a file should say, put it in a write_file or \
+edit_file call. Drafting it in prose first spends the turn twice and often leaves the run with \
+nothing written at all. Edit as you go rather than reading everything first — the early files \
+teach you more than the later reads do. Carry out the plan. Only *code changes* get \
 check_code and run_tests afterwards — a task that runs or inspects something is finished when \
 it has run, and following it with a build or test suite wastes the user's time. A project with \
 no test suite is not a problem to solve: run_tests says so, and you move on. Always close with \

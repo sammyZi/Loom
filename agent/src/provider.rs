@@ -472,8 +472,28 @@ fn default_model(settings: &Settings) -> String {
     DEFAULT_MODEL.to_string()
 }
 
+/// Context windows reported by the providers themselves, keyed by the full
+/// `provider/model` selection. The built-in catalog only carries the handful of
+/// models we curate; everything else arrives from a live `/models` call, and
+/// without this its window was assumed to be 128k.
+static LIVE_CONTEXT: std::sync::Mutex<std::collections::BTreeMap<String, u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn remember_context(sel: &str, context: u64) {
+    if let Ok(mut map) = LIVE_CONTEXT.lock() {
+        map.insert(sel.to_string(), context);
+    }
+}
+
 pub fn context_limit(model_sel: &str, settings: &Settings) -> u64 {
     let sel = normalize_model(model_sel, settings);
+    // What the provider said about this exact model wins: it is current, and
+    // the catalog cannot list every model a provider offers.
+    if let Ok(map) = LIVE_CONTEXT.lock() {
+        if let Some(n) = map.get(&sel) {
+            return *n;
+        }
+    }
     let Some((pid, mid)) = sel.split_once('/') else {
         return 128_000;
     };
@@ -559,13 +579,21 @@ pub async fn remote_models(def: &ProviderDef, settings: &Settings) -> Option<Vec
                 .unwrap_or(id)
                 .to_string();
             // OpenRouter reports context_length; plain OpenAI reports nothing.
-            let context = m
+            let reported = m
                 .get("context_length")
                 .or_else(|| m.get("context_window"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(128_000);
+                .and_then(|v| v.as_u64());
+            let context = reported.unwrap_or(128_000);
+            let sel = format!("{}/{}", def.id, id);
+            // Keep what the provider said, so the run loop stops assuming 128k
+            // for every model that is not in the built-in catalog. Guessing low
+            // is not harmless: it makes the agent summarise away context the
+            // model could still hold.
+            if let Some(n) = reported {
+                remember_context(&sel, n);
+            }
             Some(json!({
-                "id": format!("{}/{}", def.id, id),
+                "id": sel,
                 "label": label,
                 "hint": "",
                 "context": context,
@@ -1235,6 +1263,25 @@ mod tests {
         let mut s = Settings::default();
         s.default_model = default_model.into();
         s
+    }
+
+    /// The reported bug: a million-token model was being run as if it held
+    /// 128k, because only the built-in catalog was consulted. Everything a
+    /// provider lists live was invisible to the limit.
+    #[test]
+    fn a_live_models_own_context_window_wins() {
+        let s = Settings::default();
+        let sel = "openrouter/some-vendor/huge-context-model";
+
+        // Unknown to the catalog: the old code's only answer was the default.
+        assert_eq!(context_limit(sel, &s), 128_000);
+
+        // Once the provider has told us, that is the number the run must use.
+        remember_context(sel, 1_000_000);
+        assert_eq!(context_limit(sel, &s), 1_000_000);
+
+        // A curated model without a live report still reads from the catalog.
+        assert_eq!(context_limit("openai/gpt-5.2", &s), 400_000);
     }
 
     #[test]

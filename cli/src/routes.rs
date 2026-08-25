@@ -525,9 +525,6 @@ async fn agent_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> imp
         shells: st.shells.clone(),
         cancel: cancel.clone(),
         settings,
-        // Fresh per task: what was read for the last question should not
-        // suppress a re-read for this one.
-        reads: Default::default(),
         writes: Default::default(),
         read_budget: Default::default(),
         before: before_snapshot.clone(),

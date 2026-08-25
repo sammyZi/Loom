@@ -168,6 +168,11 @@ pub async fn run_task(
     // Snapshot of what had been written before each round, so a round that
     // adds nothing can end the loop instead of burning two more.
     let mut before_round = changed_files(&env);
+    // Appended to the coder prompt after a round that explored and described
+    // the work instead of doing it. Spent once: a second empty round means it
+    // is genuinely stuck, and saying so beats paying for a third.
+    let mut nudge = String::new();
+    let mut nudged = false;
     for round in 0..3 {
         if env.cancel.is_cancelled() {
             anyhow::bail!("cancelled");
@@ -177,7 +182,7 @@ pub async fn run_task(
             .send(AgentEvent::Status { message: format!("coder {}", round + 1) });
         last = spawn_role(
             AgentRole::Coder,
-            format!("User task:\n{prompt}\n\nPlan:\n{plan}\n\nImplement now.{coder_note}"),
+            format!("User task:\n{prompt}\n\nPlan:\n{plan}\n\nImplement now.{coder_note}{nudge}"),
             model.clone(),
             effort.clone(),
             coder_tools(),
@@ -199,9 +204,27 @@ pub async fn run_task(
         // reviewer here just paid for it to re-read the whole project and
         // conclude the same thing.
         if wrote_nothing(&env) {
+            // Ending the run here was too quick a surrender: the commonest way
+            // to write nothing is to spend the round reading and drafting the
+            // change in prose, which one pointed retry usually fixes. Only a
+            // second empty round is treated as stuck.
+            if !nudged {
+                nudged = true;
+                nudge = "\n\nYour last attempt changed no files: you explored the code and \
+                         described the work instead of doing it. Do not plan again, and do not \
+                         put file contents in your reply — they belong in a write_file or \
+                         edit_file call. Start with the single most important file and edit it \
+                         now; you already have what you need to begin."
+                    .into();
+                let _ = env.events.send(AgentEvent::Status {
+                    message: "nothing written — retrying".into(),
+                });
+                continue;
+            }
             let note = format!(
-                "{last}\n\n**No files were changed.** The task asked for a change but nothing \
-                 was written — treat this as unfinished rather than done."
+                "{last}\n\n**No files were changed.** Two attempts explored the code without \
+                 editing anything, so this is unfinished rather than done. A narrower ask — one \
+                 file, one change — usually gets past it."
             );
             let _ = env.events.send(AgentEvent::Done { summary: note.clone() });
             return Ok(note);
