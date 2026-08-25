@@ -119,25 +119,7 @@ The composer's Auto / Plan / Manual / Approve modes are presets over this.
 
 ---
 
-## Code graph
 
-[graphify](https://github.com/Graphify-Labs/graphify) turns the repo into a
-knowledge graph the agent can query instead of reading files to find out how
-things connect. Extraction is tree-sitter, not an LLM, and every edge is tagged
-`EXTRACTED` or `INFERRED`.
-
-```bash
-pip install graphifyy
-graphify extract . --code-only --cargo   # builds graphify-out/ (no API key)
-graphify update .                        # incremental refresh
-```
-
-`.opencode/skills/graphify/SKILL.md` teaches the agent when to reach for it —
-orientation, "who calls this", blast radius before a refactor — and which
-commands to run (`query`, `path`, `explain`, `affected`, `god-nodes`).
-`graphify-out/` is gitignored; rebuild it per clone.
-
----
 
 ## Skills
 
