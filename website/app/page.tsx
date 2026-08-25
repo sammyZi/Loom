@@ -7,14 +7,14 @@ import { Ticker, Nav, Footer, WAITLIST, REPO } from "@/components/chrome";
 const facts = [
   { value: "1", label: "binary — window, server & agent", tint: "bg-coral" },
   { value: "0", label: "accounts · keys stay local", tint: "bg-gold" },
-  { value: "14", label: "model providers in the catalog", tint: "bg-mint" },
+  { value: "15", label: "model providers in the catalog", tint: "bg-mint" },
   { value: "94%", label: "prompt-cache reuse by turn two", tint: "bg-sky-blue" },
 ];
 
 const sources = [
   { icon: "▤", label: "Any folder", tint: "bg-coral" },
   { icon: "⎇", label: "Git repo", tint: "bg-gold" },
-  { icon: "◈", label: "14 providers", tint: "bg-crimson" },
+  { icon: "◈", label: "15 providers", tint: "bg-crimson" },
 ];
 
 const outputs = [

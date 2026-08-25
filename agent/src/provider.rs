@@ -249,6 +249,27 @@ pub static CATALOG: &[ProviderDef] = &[
         ],
     },
     ProviderDef {
+        id: "nvidia",
+        label: "NVIDIA NIM",
+        kind: Kind::OpenAiCompat,
+        base_url: "https://integrate.api.nvidia.com/v1",
+        env_keys: &["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"],
+        key_optional: false,
+        reasoning_param: false,
+        thinking_flag: false,
+        stream_usage: true,
+        // Seeds only — the catalog is replaced by the live list once a key is
+        // set, and NVIDIA hosts ~100 models. These are the ones worth reaching
+        // for on code work.
+        models: models![
+            ("nvidia/llama-3.3-nemotron-super-49b-v1.5", "Nemotron Super 49B", "Strong reasoning", 128_000),
+            ("nvidia/nemotron-3-super-120b-a12b", "Nemotron 3 Super 120B", "Largest general", 128_000),
+            ("nvidia/nvidia-nemotron-nano-9b-v2", "Nemotron Nano 9B", "Fast", 128_000),
+            ("meta/llama-3.3-70b-instruct", "Llama 3.3 70B", "Via NVIDIA", 128_000),
+            ("deepseek-ai/deepseek-v4-flash-0731", "DeepSeek V4 Flash", "Via NVIDIA", 128_000),
+        ],
+    },
+    ProviderDef {
         id: "ollama",
         label: "Ollama",
         kind: Kind::OpenAiCompat,

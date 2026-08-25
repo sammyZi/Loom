@@ -168,7 +168,7 @@ cheap because the system prompt is the cached prefix — see below.
 
 ## Providers
 
-14 providers in the catalog, plus whatever their `/models` endpoint reports.
+15 providers in the catalog, plus whatever their `/models` endpoint reports.
 Configure keys in **Settings** (the gear beside *Clear all sessions*); they are
 stored in your user profile, and env vars still work as fallbacks.
 

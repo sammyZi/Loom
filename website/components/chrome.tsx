@@ -17,7 +17,7 @@ const ticker = [
   "no accounts, no telemetry",
   "sandboxed commands",
   "sessions in SQLite",
-  "14 model providers",
+  "15 model providers",
   "written in Rust",
 ];
 
