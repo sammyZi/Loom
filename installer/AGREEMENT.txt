@@ -1,0 +1,63 @@
+LOOM - LICENCE AND PRIVACY SUMMARY
+Version 0.1.0
+
+This is a summary in plain language. The full documents govern: LICENSE.md in
+the source repository (https://github.com/sammyZi/loom) and the privacy policy
+and terms published on the project website.
+
+
+1. LICENCE - FREE FOR INDIVIDUALS
+
+Loom is source-available under the PolyForm Noncommercial License 1.0.0. Use,
+modify, fork and share it freely for anything that is not commercial: your own
+work, side projects, study, teaching, or a registered charity.
+
+Using it to produce work that a company or a client pays for is commercial use
+and needs a separate licence. Email bhingesamarth@gmail.com.
+
+Source-available is not the same as open source. The noncommercial restriction
+is a real one.
+
+
+2. BETA SOFTWARE - NO WARRANTY
+
+This is pre-release software, provided "as is", without warranty of any kind.
+It can crash, it can misread a repository, and an agent acting on a bad
+instruction can edit files you would rather it left alone.
+
+Keep your work in version control, keep the permission rules tight on anything
+you cannot afford to lose, and review diffs before you stage them. To the
+extent permitted by law, the authors are not liable for lost work, lost data,
+or costs billed by a model provider.
+
+
+3. PRIVACY - IT RUNS ON YOUR MACHINE
+
+There is no Loom server, no account and no telemetry. Nothing about your use of
+this app is reported to anyone.
+
+What stays local:
+  - Your chat history, in a SQLite database in %APPDATA%\ide-ai
+  - Your settings, and your API keys, sealed with Windows DPAPI so they are
+    readable only by your Windows account
+  - The code in whatever folder you open
+
+What leaves your machine: when you send a task, your prompt and the file
+contents the agent needs are sent to the model provider you configured, using
+your own API key. That provider's own privacy policy and retention terms govern
+what happens to it from there, so it is worth reading them. Choosing a provider
+is choosing whose terms apply.
+
+The app makes no other network calls unless a task explicitly searches the web
+or fetches a URL.
+
+
+4. YOUR DATA IS YOURS
+
+Uninstalling keeps your sessions and keys; the uninstaller only removes them if
+you ask it to with -RemoveData. Deleting the folder above removes everything
+the app has ever stored.
+
+
+By continuing, you accept the terms above and the full documents they
+summarise.

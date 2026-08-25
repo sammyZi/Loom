@@ -1,0 +1,24 @@
+[package]
+name = "loom-setup"
+version = "0.1.0"
+edition = "2021"
+description = "Single-file installer for Loom"
+
+# Deliberately outside the workspace: this crate embeds the release binary at
+# compile time, so it can only be built *after* `cargo build --release -p cli`.
+# As a member it would be part of that same build and could never find it.
+
+[[bin]]
+name = "loom-setup"
+path = "src/main.rs"
+
+[dependencies]
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true

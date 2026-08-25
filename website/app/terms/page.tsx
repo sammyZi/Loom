@@ -23,7 +23,7 @@ export default function Terms() {
         <a href={REPO} target="_blank" rel="noreferrer">
           github.com/sammyZi/loom
         </a>{" "}
-        under the PolyForm Noncommercial License 1.0.0. Use it, modify it, fork
+        under the PolyForm Noncommercial License 1.0.0, copyright Samarth Bhinge. Use it, modify it, fork
         it and share it freely for anything that is not commercial — your own
         work, side projects, study, teaching, or a registered charity. Using it
         to produce work a company or client pays for is commercial use and needs

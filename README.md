@@ -263,3 +263,5 @@ The full text is in [LICENSE.md](LICENSE.md), copied verbatim from the
 [PolyForm project](https://polyformproject.org/licenses/noncommercial/1.0.0).
 Where this summary and that text disagree, the text wins — the table above is a
 reading aid, not the license.
+
+Copyright (c) 2026 Samarth Bhinge.

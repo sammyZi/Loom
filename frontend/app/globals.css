@@ -514,8 +514,8 @@ body.dragging-col {
   margin-left: auto;
   flex: 0 1 auto;
   min-width: 0;
+  max-width: 11rem;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10px;
   font-weight: 400;
@@ -2153,3 +2153,28 @@ body.dragging-col {
 .model-picker-scroll::-webkit-scrollbar { width: 4px; background: transparent; }
 .model-picker-scroll::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
 .model-picker-scroll:hover::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / 0.3); }
+
+/* Rolling names — a long model name scrolls inside its box instead of ending
+   in an ellipsis that hides the part telling two gateway models apart. The
+   pauses at each end are what make it readable rather than a treadmill. */
+@keyframes roll-x {
+  0%,
+  14% {
+    transform: translateX(0);
+  }
+  50%,
+  64% {
+    transform: translateX(var(--roll, 0));
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+.roll-x {
+  animation: roll-x var(--roll-dur, 8s) ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .roll-x {
+    animation: none;
+  }
+}

@@ -158,7 +158,7 @@ export function Footer() {
         </div>
 
         <div className="mt-14 flex flex-wrap items-center gap-x-6 gap-y-3 border-t border-ash pt-8 text-caption uppercase text-smoke">
-          <span>© 2026 Loom · PolyForm Noncommercial</span>
+          <span>© 2026 Samarth Bhinge · PolyForm Noncommercial</span>
           <span>Windows · early build</span>
           <span className="sm:ml-auto">built in the open</span>
         </div>

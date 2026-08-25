@@ -85,6 +85,63 @@ function MorphingText({ text }: { text: string }) {
   );
 }
 
+/**
+ * Long model names used to end in an ellipsis, which hides the part that tells
+ * two gateway models apart. This scrolls the name inside its box instead, and
+ * only when it actually overflows — a name that fits never moves.
+ *
+ * `active` gates the animation so a 400-row provider list is not animating 400
+ * names at once; the rows pass their hover/cursor state in.
+ */
+function RollingText({
+  text,
+  className,
+  active = true,
+}: {
+  text: string;
+  className?: string;
+  active?: boolean;
+}) {
+  const box = useRef<HTMLSpanElement>(null);
+  const inner = useRef<HTMLSpanElement>(null);
+  const [over, setOver] = useState(0);
+
+  useEffect(() => {
+    const b = box.current;
+    const i = inner.current;
+    if (!b || !i) return;
+    // A few pixels of slack: sub-pixel text metrics report a permanent
+    // overflow on names that visibly fit, and a 4px scroll is jitter, not
+    // information.
+    const d = i.scrollWidth - b.clientWidth;
+    setOver(d > 6 ? d : 0);
+  }, [text]);
+
+  const rolling = over > 0 && active;
+  return (
+    <span
+      ref={box}
+      className={cn("relative block min-w-0 overflow-hidden whitespace-nowrap", className)}
+    >
+      <span
+        ref={inner}
+        className={cn("inline-block", rolling && "roll-x")}
+        style={
+          rolling
+            ? ({
+                "--roll": `-${over}px`,
+                // Pace it by distance so a slightly long name does not crawl.
+                "--roll-dur": `${Math.max(4, over / 18 + 3).toFixed(1)}s`,
+              } as React.CSSProperties)
+            : undefined
+        }
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
 function ModelIcon({ model, className }: { model: string; className?: string }) {
   const icons: Record<string, LucideIcon> = {
     deepseek: Zap,
@@ -472,8 +529,8 @@ function ModelPicker({
         aria-label={`Select model. Current: ${modelLabel(groups, value)}`}
       >
         <ModelIcon model={value} className="size-3.5 opacity-70 group-hover:opacity-100 transition-opacity" />
-        <span className="text-xs font-semibold select-none">
-          <MorphingText text={modelLabel(groups, value)} />
+        <span className="max-w-[13rem] text-xs font-semibold select-none">
+          <RollingText text={modelLabel(groups, value)} />
         </span>
       </button>
 
@@ -565,10 +622,14 @@ function ModelPicker({
                   )}
                 >
                   <ModelIcon model={m.id} className="size-3.5 opacity-85 shrink-0" />
-                  <span className="truncate">{m.label}</span>
+                  <RollingText text={m.label} active={atCursor} className="min-w-0 flex-1" />
                   {/* Gateways carry near-duplicate names, so the real id is the
                       only way to tell two rows apart. */}
-                  <span className="picker-id">{m.id.slice(g.id.length + 1)}</span>
+                  <RollingText
+                    text={m.id.slice(g.id.length + 1)}
+                    active={atCursor}
+                    className="picker-id"
+                  />
                   {/* Kept mounted so the row width does not jump on select. */}
                   <Check
                     className={cn(

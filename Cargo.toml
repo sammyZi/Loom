@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["core", "viewer", "sandbox", "agent", "orchestrator", "cli"]
+# Built separately, after the release binary it embeds exists.
+exclude = ["installer/setup"]
 
 [workspace.package]
 version = "0.1.0"
