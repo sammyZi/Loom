@@ -1947,7 +1947,7 @@ body.dragging-col {
 }
 .side-foot-row { display: flex; align-items: stretch; gap: 6px; }
 .side-foot-row .clear-all { flex: 1; min-width: 0; }
-.side-foot-row .clear-all:not(.armed) { justify-content: flex-start; }
+.side-foot-row .clear-all { justify-content: flex-start; }
 /* Same shell as .clear-all so the pair reads as one control, not two styles. */
 .foot-gear {
   display: grid;
@@ -1964,12 +1964,6 @@ body.dragging-col {
 .foot-gear svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; }
 .clear-all svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; flex-shrink: 0; }
 .clear-all:hover { background: var(--hover); color: var(--text-2); border-color: var(--border-2); }
-.clear-all.armed {
-  background: var(--danger-soft);
-  border-color: transparent;
-  color: var(--danger);
-  font-weight: 550;
-}
 
 /* Pinned rather than in flow, so showing it does not shift the centred stack. */
 .welcome-back {

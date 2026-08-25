@@ -77,7 +77,6 @@ export function Sidebar({
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const [confirmClear, setConfirmClear] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
 
@@ -392,20 +391,29 @@ export function Sidebar({
       <div className="side-foot">
         <div className="side-foot-row">
           <button
-            className={`clear-all ${confirmClear ? "armed" : ""}`}
+            className="clear-all"
             onClick={() => {
-              if (!confirmClear) {
-                setConfirmClear(true);
-                setTimeout(() => setConfirmClear(false), 4000);
-                return;
-              }
-              setConfirmClear(false);
-              onClearAll();
+              // A click-again toggle used to guard this, armed for four
+              // seconds. Read the label, think about it, click a moment too
+              // late and that click merely re-armed it - so a careful user
+              // could press it all day and never delete anything. A dialog
+              // has no clock, and says what is about to be destroyed.
+              const total =
+                groups.reduce((n, g) => n + g.sessions.length, 0) + archived.length;
+              if (total === 0) return;
+              const ok = window.confirm(
+                `Delete all ${total} stored session${total === 1 ? "" : "s"}, ` +
+                  `across every project?
+
+This cannot be undone. Your API keys ` +
+                  `and settings are not affected.`,
+              );
+              if (ok) onClearAll();
             }}
             title="Delete every stored session, for all projects"
           >
             <IconTrash />
-            {confirmClear ? "Click again to delete all" : "Clear all sessions"}
+            Clear all sessions
           </button>
           <button
             className="foot-gear"

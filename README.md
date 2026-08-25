@@ -5,7 +5,10 @@ app: it serves the API, hosts the embedded web UI in its own window, and runs th
 agent itself — open a folder and it works in that folder, on your machine, with
 your own provider keys.
 
-```bash
+![The Loom window: session list on the left, the agent's tool calls and summary
+in the centre, a commit bar and prompt box at the bottom](docs/screenshot.png)
+
+```powershell
 cargo build -p cli
 ./target/debug/ide-ai.exe        # opens the Loom window (serves http://127.0.0.1:8080)
 ```
@@ -58,17 +61,17 @@ frontend/      Next.js UI, statically exported and embedded into the binary
 `cli` embeds `frontend/out` with `rust_embed` **at compile time**. A frontend
 change is invisible to the running app until you rebuild both:
 
-```bash
-cd frontend && npx next build     # regenerates frontend/out
-cd .. && cargo build -p cli       # re-embeds it
+```powershell
+cd frontend; npx next build     # regenerates frontend/out
+cd ..; cargo build -p cli       # re-embeds it
 ```
 
 For UI work, run the dev server instead — it proxies the API on :8080. Keep the
 app running for the backend and open the dev server in a browser; :3000 is
 allow-listed for CORS (add others with `IDE_AI_EXTRA_ORIGIN`):
 
-```bash
-cd frontend && npm run dev        # http://localhost:3000
+```powershell
+cd frontend; npm run dev          # http://localhost:3000
 ```
 
 ---
@@ -201,12 +204,15 @@ directory (`create-next-app` refuses to scaffold into one).
 
 ## Development
 
-```bash
+```powershell
 cargo test --workspace            # Rust
-cd frontend && npx tsc --noEmit   # types
-node lib/browser.test.mjs && node lib/feed.test.mjs \
-  && node lib/speech.test.mjs && node lib/terminal.test.mjs
+cd frontend; npx tsc --noEmit     # types
+node lib/browser.test.mjs; node lib/feed.test.mjs
+node lib/speech.test.mjs; node lib/terminal.test.mjs
 ```
+
+`&&` is not a statement separator in Windows PowerShell 5.1 - chain with `;`,
+or `; if ($?) { ... }` when the next step depends on the last one succeeding.
 
 Frontend tests are plain `node` scripts with `assert` — no framework. The working
 ones mirror the source logic rather than importing it, because the source is

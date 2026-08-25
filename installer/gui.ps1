@@ -123,6 +123,24 @@ function Invoke-Step($script, $argList) {
     return @{ Code = $p.ExitCode; Text = $text }
 }
 
+# WebView2 renders the whole UI. Windows 11 ships it and Edge keeps it updated,
+# but a clean Windows 10 may not have it, and without it the app opens a blank
+# window - which looks like a broken build rather than a missing prerequisite.
+function Test-WebView2 {
+    $keys = @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    )
+    foreach ($k in $keys) {
+        if (Test-Path $k) {
+            $v = (Get-ItemProperty $k -Name pv -ErrorAction SilentlyContinue).pv
+            if ($v -and $v -ne '0.0.0.0') { return $v }
+        }
+    }
+    return $null
+}
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = if ($Uninstall) { "$AppName Uninstall" } else { "$AppName Setup" }
 $form.Size = New-Object System.Drawing.Size(600, 560)
@@ -230,6 +248,17 @@ if ($Uninstall) {
     $desktop.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
     $desktop.ForeColor = $Ink
     $form.Controls.Add($desktop)
+
+    $wv = Test-WebView2
+    if (-not $wv) {
+        $warn = New-Label "WebView2 runtime not found. Loom needs it to draw its window - install it, then run this setup again." 30 418 350 40 8.5 ([System.Drawing.Color]::FromArgb(170, 90, 20)) $false
+        $form.Controls.Add($warn)
+        $get = New-Button 'Get WebView2' 380 418 110 26 $false
+        $get.Add_Click({
+            Start-Process 'https://developer.microsoft.com/microsoft-edge/webview2/'
+        })
+        $form.Controls.Add($get)
+    }
 
     $go = New-Button 'Install' 380 480 90 34 $true
     $cancel = New-Button 'Cancel' 478 480 86 34 $false

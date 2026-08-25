@@ -56,3 +56,32 @@ still works after this repository is gone.
 - Distributing a single `setup.exe` instead would mean [Inno
   Setup](https://jrsoftware.org/isinfo.php) and a build step; these scripts
   need nothing beyond what Windows already has.
+
+## Sharing the setup exe
+
+`loom-setup.exe` is the whole app in one file: the release binary (with the UI
+compiled into it), the install and uninstall scripts, the window, and the
+agreement. Nothing is downloaded at install time, and no API key of yours is in
+it - each person configures their own, sealed to their own Windows account.
+
+What the receiving machine still needs:
+
+| | |
+| --- | --- |
+| Windows 10/11 x64 | The sandbox is Windows-specific |
+| WebView2 runtime | Ships with Windows 11; the installer window says so and links to it when missing |
+| PowerShell 5.1 | Ships with Windows |
+
+The binaries are built with a static CRT (see `.cargo/config.toml`), so they do
+**not** need the Visual C++ Redistributable. Without that setting a shared copy
+fails to start on a machine that has never had a C++ app installed.
+
+Two things to warn people about:
+
+- **SmartScreen.** The exe is unsigned, so Windows shows "Windows protected
+  your PC" on first run; it takes *More info* then *Run anyway*. Removing that
+  warning needs a code-signing certificate, which costs money and is issued to
+  a named person or company.
+- **The licence.** Sharing is fine, and the installer shows the terms before it
+  does anything - but PolyForm Noncommercial means recipients may not use it
+  for commercial work without a separate licence.
