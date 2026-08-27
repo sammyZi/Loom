@@ -703,6 +703,24 @@ export default function Home() {
             no public download yet · free for individuals · source on GitHub
           </p>
         </section>
+
+        {/* brand wordmark — decorative only. The footer right below already
+            names the product, so announcing it twice would just be noise. */}
+        {/* brand wordmark — black band, mirroring the ticker at the top of the
+            page. Decorative only: the footer right below names the product, so
+            announcing it twice would just be noise. */}
+        <section className="bg-off-black px-5 pt-10 pb-12 sm:px-6 sm:pt-16 sm:pb-20">
+          <p
+            aria-hidden
+            className="wordmark mx-auto max-w-[1432px] select-none text-center font-serif tracking-[-0.035em]"
+            /* leading has to clear the glyphs: Newsreader wants a full 1em of
+               height, and cropping it sheared the tops off the l and the o's.
+               32vw leaves a real margin instead of running to the edge. */
+            style={{ fontSize: "clamp(64px, 38vw, 500px)", lineHeight: 1.02 }}
+          >
+            loom
+          </p>
+        </section>
       </main>
 
       <Footer />

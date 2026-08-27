@@ -154,6 +154,34 @@ details[open] .chev {
   );
 }
 
+/* oversized brand wordmark — the same palette ramp as .band, poured into type */
+.wordmark {
+  /* Fallback first: if the clip is unsupported the word stays readable in
+     parchment rather than disappearing, which is what transparent text does on
+     its own. Light, because this sits on the black band. */
+  color: var(--color-parchment);
+}
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .wordmark {
+    /* Literally the .band ramp. It reads here only because the band behind it
+       is dark: measured against parchment these five run 1.1–1.9:1 — a mint
+       "o" at 400px was all but invisible — and against off-black they clear
+       9:1. The palette was never the problem, the surface was. */
+    background: linear-gradient(
+      90deg,
+      var(--color-coral),
+      var(--color-gold),
+      var(--color-mint),
+      var(--color-sky-blue),
+      var(--color-periwinkle-mist)
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
 /* announcement ticker — duplicated track, translated by half its width */
 .marquee {
   display: flex;
