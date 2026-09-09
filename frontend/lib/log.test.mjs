@@ -1,7 +1,7 @@
 // node lib/log.test.mjs — checks the NO_CODE marker never survives into the transcript.
 import assert from "node:assert/strict";
 
-const { mergeLog, toolLabel, groupLog } = await import("./log.js");
+const { mergeLog, toolLabel, groupLog } = await import("./log.ts");
 
 // marker split across streamed deltas, the case render-time stripping missed
 let log = [];

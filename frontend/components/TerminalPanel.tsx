@@ -9,7 +9,7 @@ import {
   IconStop,
 } from "@/components/Icons";
 import { api, connectWs, type ShellEvent } from "@/lib/api";
-import { errText } from "@/lib/log";
+import { appendLog, errText } from "@/lib/log";
 import { useEffect, useRef, useState } from "react";
 
 /** `job` keys this terminal's running command on the server; it only has to be
@@ -203,7 +203,7 @@ export function TerminalPanel({
         // window driving the same backend.
         if (!prev.some((t) => t.job === ev.id)) return prev;
         streamed.current.add(ev.id);
-        return prev.map((t) => (t.job === ev.id ? { ...t, log: t.log + ev.text } : t));
+        return prev.map((t) => (t.job === ev.id ? { ...t, log: appendLog(t.log, ev.text) } : t));
       });
       // Background jobs have no follow-up response; the backend's exit note is
       // what flips their tab back to idle.

@@ -9,5 +9,6 @@ agent = { path = "../agent" }
 ide_core = { path = "../core" }
 sandbox = { path = "../sandbox" }
 tokio.workspace = true
+tracing.workspace = true
 tokio-util.workspace = true
 viewer = { path = "../viewer" }

@@ -126,18 +126,27 @@ impl Db {
         }
     }
 
-    /// Non-archived sessions, newest first by start time. Each transcript is
-    /// capped at its most recent messages so a huge history cannot stall the
-    /// list endpoint that the sidebar polls.
+    /// Non-archived sessions, newest first by start time, with their
+    /// transcripts attached.
     pub fn list(&self) -> Result<Vec<Session>> {
-        const MSG_CAP: usize = 300;
+        self.list_where(false)
+    }
+
+    /// Only the archived sessions, newest first — the sidebar's archive view.
+    pub fn list_archived(&self) -> Result<Vec<Session>> {
+        self.list_where(true)
+    }
+
+    /// One side of the archived flag. `list` and `list_archived` were the same
+    /// forty lines twice over, differing only in this boolean.
+    fn list_where(&self, archived: bool) -> Result<Vec<Session>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, folder, title, at, created, archived
-             FROM session WHERE archived = 0 ORDER BY created DESC",
+             FROM session WHERE archived = ?1 ORDER BY created DESC",
         )?;
         let mut sessions: Vec<Session> = stmt
-            .query_map([], |r| {
+            .query_map([archived as i64], |r| {
                 Ok(Session {
                     id: r.get(0)?,
                     folder: r.get(1)?,
@@ -151,16 +160,43 @@ impl Db {
             .filter_map(|r| r.ok())
             .collect();
 
-        // Newest-first per session, so truncating keeps the latest messages;
-        // reversed again below to restore chronological order.
-        let mut msgs = conn.prepare(
-            "SELECT session_id, id, kind, text, detail, extra FROM message \
-             ORDER BY session_id, seq DESC",
+        let mut by_session = Self::logs_for(&conn, archived)?;
+        for s in &mut sessions {
+            if let Some(items) = by_session.remove(&s.id) {
+                s.log = serde_json::Value::Array(items);
+            }
+        }
+        Ok(sessions)
+    }
+
+    /// The most recent `MSG_CAP` messages of each session on one side of the
+    /// archived flag, in chronological order, keyed by session id.
+    ///
+    /// The cap is applied by SQLite rather than after the fact. The old query
+    /// was an unbounded `SELECT … FROM message` — every message of every
+    /// session, archived ones included — decoded into JSON in Rust and then
+    /// truncated to 300. On the endpoint the sidebar polls, and which every
+    /// transcript save re-runs, that meant the whole history was deserialized
+    /// on each keystroke-triggered save of a long chat.
+    fn logs_for(
+        conn: &Connection,
+        archived: bool,
+    ) -> Result<std::collections::HashMap<String, Vec<serde_json::Value>>> {
+        const MSG_CAP: i64 = 300;
+        let mut stmt = conn.prepare(
+            "SELECT session_id, id, kind, text, detail, extra FROM (
+                 SELECT m.session_id, m.id, m.kind, m.text, m.detail, m.extra, m.seq,
+                        ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.seq DESC) AS rn
+                 FROM message m JOIN session s ON s.id = m.session_id
+                 WHERE s.archived = ?1
+             )
+             WHERE rn <= ?2
+             ORDER BY session_id, seq",
         )?;
         let mut by_session: std::collections::HashMap<String, Vec<serde_json::Value>> =
             std::collections::HashMap::new();
-        for row in msgs
-            .query_map([], |r| {
+        for row in stmt
+            .query_map(rusqlite::params![archived as i64, MSG_CAP], |r| {
                 let detail: Option<String> = r.get(4)?;
                 let extra: Option<String> = r.get(5)?;
                 let mut item = serde_json::json!({
@@ -176,14 +212,7 @@ impl Db {
         {
             by_session.entry(row.0).or_default().push(row.1);
         }
-        for s in &mut sessions {
-            if let Some(mut items) = by_session.remove(&s.id) {
-                items.truncate(MSG_CAP);
-                items.reverse();
-                s.log = serde_json::Value::Array(items);
-            }
-        }
-        Ok(sessions)
+        Ok(by_session)
     }
 
     /// Insert or update. The original `created` is preserved so reopening or
@@ -255,64 +284,6 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute("UPDATE session SET archived = 0 WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    /// Only the archived sessions, newest first — the sidebar's archive view.
-    pub fn list_archived(&self) -> Result<Vec<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT s.id, s.folder, s.title, s.at, s.created, s.archived
-             FROM session s WHERE s.archived = 1 ORDER BY s.created DESC",
-        )?;
-        let mut sessions: Vec<Session> = stmt
-            .query_map([], |r| {
-                Ok(Session {
-                    id: r.get(0)?,
-                    folder: r.get(1)?,
-                    title: r.get(2)?,
-                    log: serde_json::json!([]),
-                    at: r.get(3)?,
-                    created: r.get(4)?,
-                    archived: r.get::<_, i64>(5)? != 0,
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        // Attach each archived transcript (same cap as list()).
-        const MSG_CAP: usize = 300;
-        let mut msgs = conn.prepare(
-            "SELECT m.session_id, m.id, m.kind, m.text, m.detail, m.extra
-             FROM message m JOIN session s ON s.id = m.session_id
-             WHERE s.archived = 1 ORDER BY m.session_id, m.seq DESC",
-        )?;
-        let mut by_session: std::collections::HashMap<String, Vec<serde_json::Value>> =
-            std::collections::HashMap::new();
-        for row in msgs
-            .query_map([], |r| {
-                let detail: Option<String> = r.get(4)?;
-                let extra: Option<String> = r.get(5)?;
-                let mut item = serde_json::json!({
-                    "id": r.get::<_, String>(1)?,
-                    "kind": r.get::<_, String>(2)?,
-                    "text": r.get::<_, String>(3)?,
-                    "detail": detail,
-                });
-                merge_extra(&mut item, extra);
-                Ok((r.get::<_, String>(0)?, item))
-            })?
-            .flatten()
-        {
-            by_session.entry(row.0).or_default().push(row.1);
-        }
-        for s in &mut sessions {
-            if let Some(mut items) = by_session.remove(&s.id) {
-                items.truncate(MSG_CAP);
-                items.reverse();
-                s.log = serde_json::Value::Array(items);
-            }
-        }
-        Ok(sessions)
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -520,6 +491,26 @@ mod message_tests {
         .unwrap();
         assert_eq!(message_count(&db), 2, "must not accumulate duplicates");
         assert_eq!(db.list().unwrap()[0].log.as_array().unwrap().len(), 2);
+    }
+
+    /// The cap is what stops one runaway chat from stalling the endpoint the
+    /// sidebar polls. It has to keep the *newest* messages and keep them in
+    /// order — an off-by-one in the window function would silently hand the
+    /// user the oldest 300 instead, which looks like a chat that stopped
+    /// updating.
+    #[test]
+    fn a_huge_transcript_is_capped_to_its_newest_messages() {
+        let db = mem();
+        let items: Vec<serde_json::Value> = (0..350)
+            .map(|i| serde_json::json!({ "kind": "user", "text": format!("m{i}") }))
+            .collect();
+        db.upsert(&with_log("s1", serde_json::Value::Array(items))).unwrap();
+
+        let log = db.list().unwrap()[0].log.clone();
+        let got = log.as_array().unwrap();
+        assert_eq!(got.len(), 300, "capped");
+        assert_eq!(got[0]["text"], "m50", "oldest kept is the 51st, not the 1st");
+        assert_eq!(got[299]["text"], "m349", "newest is last — chronological order");
     }
 
     #[test]

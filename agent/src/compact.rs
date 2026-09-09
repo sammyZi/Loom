@@ -26,7 +26,7 @@ const PRUNED_PLACEHOLDER: &str = "[old tool result cleared]";
 /// enough to decide *when* to compact; the provider's own usage report is the
 /// accurate number and feeds back through StreamKind::Usage.
 pub fn estimate_tokens(messages: &[Message]) -> u64 {
-    let chars: usize = messages.iter().map(|m| m.preview().len()).sum();
+    let chars: usize = messages.iter().map(|m| m.weight()).sum();
     (chars as f64 / 4.0).ceil() as u64
 }
 
@@ -73,12 +73,15 @@ pub fn prune_tool_outputs(messages: &mut [Message], protect_tail_tokens: u64) ->
         if m.role != "tool" {
             continue;
         }
-        let len = m.preview().len() as u64 / 4;
+        let len = m.weight() as u64 / 4;
         if seen_from_end < protect_tail_tokens {
             seen_from_end += len;
             continue;
         }
-        if m.preview().contains(PRUNED_PLACEHOLDER) {
+        // Exact match on the content, not a substring of a freshly
+        // allocated JSON copy: a tool result that merely *mentions* the
+        // placeholder is not one we already cleared.
+        if m.content.as_ref().and_then(|c| c.as_str()) == Some(PRUNED_PLACEHOLDER) {
             continue; // already cleared on a previous pass
         }
         m.content = Some(json!(PRUNED_PLACEHOLDER));
@@ -99,7 +102,7 @@ pub fn summarize_split(messages: &[Message], preserve_budget_tokens: u64) -> Opt
     let mut split = messages.len();
     for i in (0..messages.len()).rev() {
         let m = &messages[i];
-        let len = m.preview().len() as u64 / 4;
+        let len = m.weight() as u64 / 4;
         if i != messages.len() - 1 && size + len > preserve_budget_tokens {
             break;
         }

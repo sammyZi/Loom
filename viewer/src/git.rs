@@ -45,6 +45,14 @@ pub fn status(ws: &WorkspaceRoot) -> Result<GitStatus> {
 pub fn diff(ws: &WorkspaceRoot, rel: Option<&str>) -> Result<String> {
     let repo = open(ws)?;
     let mut opts = DiffOptions::new();
+    // Untracked files are the agent's most common output — a brand new
+    // component, a new route — and git's default diff omits them entirely.
+    // The Changes panel listed such a file as "untracked" from `status` and
+    // then showed an empty diff for it, which read as a file that had been
+    // created with nothing in it.
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
     if let Some(p) = rel {
         opts.pathspec(p);
     }

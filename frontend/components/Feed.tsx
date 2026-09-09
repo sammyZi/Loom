@@ -88,19 +88,23 @@ export function Feed({
           const last = i === groups.length - 1;
           // Skipped only while the status line is showing it.
           if (busy && i === thinkAt) return null;
-          return "items" in g ? (
-            <ToolLine key={i} items={g.items} running={busy && last} />
-          ) : (
+          if ("items" in g) return <ToolLine key={i} items={g.items} running={busy && last} />;
+          // Once per row, not twice. turnUndo scans the log from this message
+          // to the end, and it was called twice for every user row on every
+          // render — with one render per streamed token, that made the feed
+          // re-walk the whole transcript for each character that arrived.
+          const undoCount = g.kind === "user" ? turnUndo(log, g).count : 0;
+          return (
             <Message
               key={i}
               item={g}
               live={busy && last}
               onRevert={onRevert}
               onRevertTurn={onRevertTurn}
-              canUndo={g.kind === "user" && turnUndo(log, g).count > 0}
+              canUndo={undoCount > 0}
               undoTitle={
                 g.kind === "user"
-                  ? `Undo this message: put ${turnUndo(log, g).count} file(s) back to how they were before it`
+                  ? `Undo this message: put ${undoCount} file(s) back to how they were before it`
                   : undefined
               }
             />

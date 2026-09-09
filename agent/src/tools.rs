@@ -866,7 +866,16 @@ impl Tool for SearchFiles {
                 let Ok(content) = std::fs::read_to_string(&path) else {
                     continue; // binary or non-UTF-8
                 };
-                let hay = if ci { content.to_lowercase() } else { content.clone() };
+                // Only the case-insensitive path needs a second copy of the
+                // file; `content.clone()` was allocating one per file scanned
+                // even when the query was case-sensitive.
+                let lowered;
+                let hay: &str = if ci {
+                    lowered = content.to_lowercase();
+                    &lowered
+                } else {
+                    &content
+                };
                 let mut per_file = 0usize;
                 for (line_no, (raw, low)) in content.lines().zip(hay.lines()).enumerate() {
                     if !low.contains(&needle) {
@@ -885,9 +894,12 @@ impl Tool for SearchFiles {
                 }
                 if per_file > 0 {
                     files_hit += 1;
-                    if cancel.is_cancelled() {
-                        anyhow::bail!("cancelled");
-                    }
+                }
+                // Checked every file, not only the ones that matched: a query
+                // with no hits across a large tree was the one case Stop could
+                // not interrupt, because the check sat inside the match arm.
+                if cancel.is_cancelled() {
+                    anyhow::bail!("cancelled");
                 }
             }
             if total == 0 {
@@ -982,6 +994,14 @@ impl Tool for ReadFile {
         use std::sync::atomic::Ordering::Relaxed;
         let spent = ctx.read_budget.load(Relaxed);
         if spent + raw.len() > READ_BUDGET_BYTES {
+            // Un-record the read above. The model never saw these contents, so
+            // leaving the entry in place made the *next* attempt answer "already
+            // read earlier in this task, its contents are already above" about a
+            // file that was refused — the model then stopped asking and worked
+            // from a file it had never been given.
+            if let Ok(mut reads) = ctx.reads.lock() {
+                reads.remove(path);
+            }
             return Ok(format!(
                 "refused: this task has already read {} KB of source and {path} would take it \
                  past the whole-file budget ({} lines). Use search_files to locate what you \
@@ -1719,113 +1739,12 @@ impl Tool for CheckCode {
         json!({ "type": "object", "properties": {} })
     }
     async fn call(&self, ctx: &ToolCtx, _input: Value, cancel: &CancellationToken) -> Result<String> {
-        if cancel.is_cancelled() {
-            anyhow::bail!("cancelled");
-        }
-        use crate::project::Stack;
-        match Stack::detect(&ctx.ws) {
-            Stack::Cargo => {}
-            Stack::Node => {
-                if !ctx.ws.root().join("tsconfig.json").exists() {
-                    return Ok("no type-check configured (no tsconfig.json)".into());
-                }
-                return format_cmd(
-                    ctx.sandbox
-                        .run(
-                            &ctx.ws,
-                            "npx",
-                            &["tsc".into(), "--noEmit".into()],
-                            Duration::from_secs(240),
-                            cancel,
-                        )
-                        .await?,
-                );
-            }
-            Stack::Go => {
-                return format_cmd(
-                    ctx.sandbox
-                        .run(&ctx.ws, "go", &["build".into(), "./...".into()], Duration::from_secs(240), cancel)
-                        .await?,
-                );
-            }
-            Stack::Python | Stack::Unknown => {
-                return Ok("no check configured for this project type".into());
-            }
-        }
-        let check = ctx
-            .sandbox
-            .run(
-                &ctx.ws,
-                "cargo",
-                &["check".into(), "--message-format=short".into()],
-                Duration::from_secs(180),
-                cancel,
-            )
-            .await?;
-        if check.exit_code != 0 {
-            return format_cmd(check);
-        }
-        let clippy = ctx
-            .sandbox
-            .run(
-                &ctx.ws,
-                "cargo",
-                &[
-                    "clippy".into(),
-                    "--message-format=short".into(),
-                    "--".into(),
-                    "-W".into(),
-                    "clippy::all".into(),
-                ],
-                Duration::from_secs(180),
-                cancel,
-            )
-            .await;
-        match clippy {
-            Ok(c) => format_cmd(c),
-            Err(_) => format_cmd(check),
-        }
+        // Body lives in `checks` so the orchestrator's gate runs exactly what
+        // the model runs.
+        Ok(crate::checks::check_code(&ctx.ws, &ctx.sandbox, cancel).await?.report)
     }
 }
 
-/// `Some(reason)` when the project plainly has no suite to run, so the caller
-/// can say so instead of starting a runner that will fail for want of tests.
-/// Only claims "no tests" on evidence; anything ambiguous runs as before.
-fn no_test_suite(ws: &ide_core::WorkspaceRoot, stack: crate::project::Stack) -> Option<String> {
-    use crate::project::Stack;
-    let root = ws.root();
-    match stack {
-        Stack::Node => {
-            let pkg = std::fs::read_to_string(root.join("package.json")).ok()?;
-            let json: Value = serde_json::from_str(&pkg).ok()?;
-            // A missing `scripts` object means no test script — the `?` here
-            // used to bail out of the whole check and run the runner anyway.
-            let script = json
-                .get("scripts")
-                .and_then(|s| s.get("test"))
-                .and_then(|v| v.as_str());
-            match script {
-                // `npm init` writes this placeholder; it is not a test suite.
-                None => Some("this project has no test script in package.json — nothing to run".into()),
-                Some(s) if s.contains("no test specified") => {
-                    Some("package.json still has npm's placeholder test script — no suite to run".into())
-                }
-                Some(_) => None,
-            }
-        }
-        Stack::Python => {
-            let has = root.join("tests").is_dir()
-                || root.join("pytest.ini").exists()
-                || root.join("conftest.py").exists()
-                || std::fs::read_dir(root).ok()?.flatten().any(|e| {
-                    e.file_name().to_string_lossy().starts_with("test_")
-                });
-            (!has).then(|| "no tests directory or test_*.py in this project — nothing to run".into())
-        }
-        // cargo and go both handle an empty suite sensibly and cheaply.
-        _ => None,
-    }
-}
 
 #[async_trait]
 impl Tool for RunTests {
@@ -1840,37 +1759,22 @@ impl Tool for RunTests {
         json!({ "type": "object", "properties": {} })
     }
     async fn call(&self, ctx: &ToolCtx, _input: Value, cancel: &CancellationToken) -> Result<String> {
-        if cancel.is_cancelled() {
-            anyhow::bail!("cancelled");
-        }
-        use crate::project::Stack;
-        let stack = Stack::detect(&ctx.ws);
-        // Ask the project whether it has tests before paying to start a runner.
-        // `npm test` in a package with no test script burns a process and comes
-        // back "exit 1, no output" on every single run, which reads like a
-        // failure and taught nobody anything.
-        if let Some(why) = no_test_suite(&ctx.ws, stack) {
-            return Ok(why);
-        }
-        let (program, args): (&str, Vec<String>) = match stack {
-            Stack::Cargo => ("cargo", vec!["test".into()]),
-            Stack::Node => ("npm", vec!["test".into(), "--silent".into()]),
-            Stack::Go => ("go", vec!["test".into(), "./...".into()]),
-            Stack::Python => ("python", vec!["-m".into(), "pytest".into(), "-q".into()]),
-            Stack::Unknown => return Ok("no test runner configured for this project type".into()),
-        };
-        format_cmd(
-            ctx.sandbox
-                .run(&ctx.ws, program, &args, Duration::from_secs(300), cancel)
-                .await?,
-        )
+        Ok(crate::checks::run_tests(&ctx.ws, &ctx.sandbox, cancel).await?.report)
     }
 }
 
-fn format_cmd(out: CommandOutput) -> Result<String> {
+/// A command's result as the model sees it. Both streams are clipped
+/// independently: a build that prints 400 KB of progress to stdout used to go
+/// into the conversation whole and never leave it — every later turn re-sent
+/// the whole thing — and clipping the joined string instead would let a noisy
+/// stdout crowd out the stderr that actually names the error.
+pub(crate) fn format_cmd(out: CommandOutput) -> Result<String> {
+    use crate::context::clip_output;
     Ok(format!(
         "exit {}\nstdout:\n{}\nstderr:\n{}",
-        out.exit_code, out.stdout, out.stderr
+        out.exit_code,
+        clip_output(&out.stdout),
+        clip_output(&out.stderr)
     ))
 }
 
@@ -1905,44 +1809,6 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
 #[cfg(test)]
 mod tool_tests {
     use super::*;
-
-    fn tmp_ws(name: &str) -> ide_core::WorkspaceRoot {
-        let d = std::env::temp_dir().join(format!("ide-ai-tests-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        ide_core::WorkspaceRoot::open(&d).unwrap()
-    }
-
-    #[test]
-    fn node_without_a_test_script_is_not_run() {
-        let ws = tmp_ws("node-none");
-        std::fs::write(ws.root().join("package.json"), r#"{"name":"x"}"#).unwrap();
-        let why = no_test_suite(&ws, crate::project::Stack::Node);
-        assert!(why.is_some(), "a package with no test script must be skipped");
-    }
-
-    #[test]
-    fn npm_placeholder_script_is_not_a_suite() {
-        let ws = tmp_ws("node-placeholder");
-        let pkg = r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#;
-        std::fs::write(ws.root().join("package.json"), pkg).unwrap();
-        assert!(no_test_suite(&ws, crate::project::Stack::Node).is_some());
-    }
-
-    #[test]
-    fn a_real_test_script_still_runs() {
-        let ws = tmp_ws("node-real");
-        std::fs::write(ws.root().join("package.json"), r#"{"scripts":{"test":"vitest run"}}"#).unwrap();
-        assert!(no_test_suite(&ws, crate::project::Stack::Node).is_none());
-    }
-
-    #[test]
-    fn python_needs_visible_tests() {
-        let ws = tmp_ws("py");
-        assert!(no_test_suite(&ws, crate::project::Stack::Python).is_some());
-        std::fs::create_dir_all(ws.root().join("tests")).unwrap();
-        assert!(no_test_suite(&ws, crate::project::Stack::Python).is_none());
-    }
 
     #[test]
     fn read_slices_are_numbered_and_say_what_is_left() {

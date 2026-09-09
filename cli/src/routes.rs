@@ -313,9 +313,9 @@ fn stage_attachment(ws: &WorkspaceRoot, att: &ImageAttachment) -> Option<(String
 const HISTORY_CHAR_BUDGET: usize = 24_000;
 
 fn trim_history(history: &mut Vec<agent::Message>) {
-    let mut size: usize = history.iter().map(|m| m.preview().len()).sum();
+    let mut size: usize = history.iter().map(|m| m.weight()).sum();
     while history.len() > 2 && size > HISTORY_CHAR_BUDGET {
-        let dropped = history.remove(0).preview().len();
+        let dropped = history.remove(0).weight();
         size = size.saturating_sub(dropped);
     }
 }

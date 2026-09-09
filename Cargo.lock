@@ -2349,6 +2349,7 @@ dependencies = [
  "sandbox",
  "tokio",
  "tokio-util",
+ "tracing",
  "viewer",
 ]
 

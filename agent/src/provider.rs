@@ -389,6 +389,33 @@ impl Message {
             .unwrap_or_default()
     }
 
+    /// Serialized size in bytes, without building the string. Same number as
+    /// `preview().len()`.
+    ///
+    /// The compaction path asks every message for its size two or three times
+    /// per turn, and `preview()` allocates a full JSON copy of the content to
+    /// answer. On a conversation near a 128k window that was several megabytes
+    /// of allocate-measure-drop per turn, for a number used only to compare
+    /// against a threshold.
+    pub fn weight(&self) -> usize {
+        struct Counter(usize);
+        impl std::io::Write for Counter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0 += buf.len();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let Some(v) = self.content.as_ref().or(self.tool_calls.as_ref()) else {
+            return 0;
+        };
+        let mut c = Counter(0);
+        let _ = serde_json::to_writer(&mut c, v);
+        c.0
+    }
+
     fn text(&self) -> String {
         match self.content.as_ref() {
             Some(Value::String(s)) => s.clone(),
@@ -773,13 +800,17 @@ async fn openai_stream(
     cancel: &CancellationToken,
     mut on_event: impl FnMut(StreamKind),
 ) -> Result<AssistantTurn> {
-    let mut body_msgs = vec![Message {
+    // Borrowed, not cloned. The whole conversation is re-sent every turn, and
+    // deep-cloning it first only to serialize it doubled the peak memory of a
+    // large context for nothing — a system message plus a vector of pointers
+    // serializes identically.
+    let system_msg = Message {
         role: "system".into(),
         content: Some(Value::String(system.to_string())),
         tool_calls: None,
         tool_call_id: None,
-    }];
-    body_msgs.extend(messages.iter().cloned());
+    };
+    let body_msgs: Vec<&Message> = std::iter::once(&system_msg).chain(messages.iter()).collect();
 
     let openai_tools: Vec<Value> = tools
         .iter()
@@ -962,11 +993,19 @@ async fn anthropic_stream(
     if let Some(last) = tool_defs.last_mut() {
         last["cache_control"] = json!({ "type": "ephemeral" });
     }
+    // Cache the transcript too, not just the prefix above it. System and tools
+    // are the *small* half of a long run: by turn thirty the conversation —
+    // every file read, every command's output — dwarfs them, and all of it was
+    // being re-processed at full price on every single turn. A breakpoint on
+    // the tip means each turn reads the previous turn's prefix from cache and
+    // writes only what it added. Three breakpoints total, under the limit of 4.
+    let mut convo = to_anthropic_messages(messages);
+    cache_conversation_tip(&mut convo);
     let body = json!({
         "model": model,
         "max_tokens": MAX_OUTPUT_TOKENS,
         "system": cached_system,
-        "messages": to_anthropic_messages(messages),
+        "messages": convo,
         "stream": true,
         "temperature": if tools.is_empty() { 1.0 } else { 0.2 },
         "tools": tool_defs,
@@ -1076,6 +1115,19 @@ fn parse_data_url(url: &str) -> Option<(&str, &str)> {
     let (meta, data) = rest.split_once(',')?;
     let mime = meta.split(';').next().unwrap_or("application/octet-stream");
     Some((mime, data))
+}
+
+/// Put a cache breakpoint on the last content block of the last turn, which is
+/// what makes the whole conversation below it a cacheable prefix.
+///
+/// Silently does nothing on a short conversation: the minimum cacheable prefix
+/// is model-dependent (512–4096 tokens) and a marker below it is ignored
+/// rather than rejected, which is the behaviour we want for a two-turn chat.
+fn cache_conversation_tip(msgs: &mut [Value]) {
+    let Some(last) = msgs.last_mut() else { return };
+    let Some(blocks) = last["content"].as_array_mut() else { return };
+    let Some(block) = blocks.last_mut() else { return };
+    block["cache_control"] = json!({ "type": "ephemeral" });
 }
 
 fn to_anthropic_messages(messages: &[Message]) -> Vec<Value> {

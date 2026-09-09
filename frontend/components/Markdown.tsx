@@ -1,12 +1,19 @@
 "use client";
 
 import { IconCheck, IconCopy, IconSpeak, IconSpeakOff } from "@/components/Icons";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-/** Agent replies arrive as markdown; render it instead of showing the raw source. */
-export function Markdown({ text }: { text: string }) {
+/**
+ * Agent replies arrive as markdown; render it instead of showing the raw source.
+ *
+ * Memoized on `text`, which is the whole point: every streamed token re-renders
+ * the feed, and without this each token re-parsed the markdown of *every reply
+ * already on screen*. On a long chat that turned streaming into a slideshow.
+ * The one reply still being streamed has changing text and re-parses as before.
+ */
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -28,7 +35,7 @@ export function Markdown({ text }: { text: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 function CodeBlock({ text }: { text: string }) {
   return (

@@ -21,6 +21,7 @@ import {
   unarchiveSession,
 } from "@/lib/api";
 import {
+  appendLog,
   baseName,
   countDiff,
   errText,
@@ -346,8 +347,11 @@ export default function Page() {
     // a command failed between the two events.
     const stopShell = connectWs("/ws/shell", (data) => {
       const ev = data as { type?: string; id?: string; text?: string };
-      if (!ev || ev.type !== "chunk" || ev.id !== "agent" || typeof ev.text !== "string") return;
-      setAgentLog((prev) => prev + ev.text);
+      // Bound to a const so the `typeof` narrowing survives into the updater
+      // closure below; `ev.text` re-widens to `string | undefined` there.
+      const text = ev?.text;
+      if (!ev || ev.type !== "chunk" || ev.id !== "agent" || typeof text !== "string") return;
+      setAgentLog((prev) => appendLog(prev, text));
     });
     return () => {
       stopFiles();

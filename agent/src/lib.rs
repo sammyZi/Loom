@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod checks;
 pub mod project;
 pub mod skills;
 pub mod provider;

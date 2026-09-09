@@ -1,4 +1,7 @@
-import { type AgentEvent } from "./api";
+// `import type` (not `import { type … }`): the type-only form is erased
+// outright, which is what lets lib/log.test.mjs load this module directly
+// under node's type stripping instead of resolving ./api at runtime.
+import type { AgentEvent } from "./api";
 
 /** `images` is data: URLs — small enough for the odd screenshot, and it has
  *  to survive round-tripping through the session's stored JSON log.
@@ -155,4 +158,22 @@ export function errText(e: unknown) {
 
 export function baseName(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+/**
+ * Ceiling on a terminal's scrollback, in characters. A dev server left running
+ * for an afternoon streams tens of megabytes; every chunk rebuilt the string
+ * and re-rendered it, so the panel got slower the longer it ran and the tab
+ * eventually ran out of memory.
+ */
+export const LOG_CAP = 200_000;
+
+/** Append to a live log, dropping the oldest output once past the cap. */
+export function appendLog(prev: string, chunk: string): string {
+  const next = prev + chunk;
+  if (next.length <= LOG_CAP) return next;
+  // Cut on a line boundary so the first surviving line is not half a line.
+  const cut = next.length - LOG_CAP;
+  const nl = next.indexOf("\n", cut);
+  return `[… earlier output trimmed …]\n${next.slice(nl >= 0 ? nl + 1 : cut)}`;
 }

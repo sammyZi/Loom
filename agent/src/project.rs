@@ -91,7 +91,12 @@ pub fn list_files(root: &Path, sub: Option<&str>, limit: usize) -> Vec<String> {
                 continue;
             }
             let path = e.path();
-            let is_dir = path.is_dir();
+            // `file_type()` comes back with the directory enumeration itself;
+            // `path.is_dir()` is a fresh stat per entry. This walk runs on
+            // every search_files (up to 4000 entries) and again for every
+            // system prompt, so that was thousands of avoidable syscalls per
+            // run — on Windows, each one opening and closing a handle.
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir && skipped(&name) {
                 continue;
             }

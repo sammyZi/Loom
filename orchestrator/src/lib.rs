@@ -10,6 +10,11 @@ const TURNS_CODE: u32 = 40;
 const TURNS_REVIEW: u32 = 15;
 const TURNS_TRIVIAL: u32 = 6;
 
+/// How many changed files make a run worth an LLM reviewer once the project's
+/// own checks already pass. Below this the checks are the whole verification
+/// story and the run ends without one.
+const REVIEW_MIN_FILES: usize = 3;
+
 /// How much of the pipeline a run uses. Picked by the user in the composer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -168,11 +173,20 @@ pub async fn run_task(
     // Snapshot of what had been written before each round, so a round that
     // adds nothing can end the loop instead of burning two more.
     let mut before_round = changed_files(&env);
-    // Appended to the coder prompt after a round that explored and described
-    // the work instead of doing it. Spent once: a second empty round means it
-    // is genuinely stuck, and saying so beats paying for a third.
-    let mut nudge = String::new();
+    // What the last round learned, appended to the next coder prompt: a failing
+    // build's own output, a reviewer's REVISE, or the wrote-nothing nudge.
+    //
+    // This used to be the nudge alone. The reviewer's REVISE was assigned to
+    // `last` and then never interpolated anywhere, so a second round re-issued
+    // a byte-identical prompt and hoped for a different answer. The loop only
+    // works if the feedback actually reaches the coder.
+    let mut feedback = String::new();
     let mut nudged = false;
+    // The last round's failing check, when it failed. Rounds are finite, so the
+    // loop can run out with the build still broken — and reporting the coder's
+    // cheerful summary in that case would be the worst outcome of the lot:
+    // "done" over a project that does not compile.
+    let mut unresolved: Option<String> = None;
     for round in 0..3 {
         if env.cancel.is_cancelled() {
             anyhow::bail!("cancelled");
@@ -182,7 +196,7 @@ pub async fn run_task(
             .send(AgentEvent::Status { message: format!("coder {}", round + 1) });
         last = spawn_role(
             AgentRole::Coder,
-            format!("User task:\n{prompt}\n\nPlan:\n{plan}\n\nImplement now.{coder_note}{nudge}"),
+            coder_prompt(&prompt, &plan, coder_note, &feedback),
             model.clone(),
             effort.clone(),
             coder_tools(),
@@ -200,9 +214,7 @@ pub async fn run_task(
         )
         .await?;
 
-        // Nothing was written, so there is nothing to review. Running the
-        // reviewer here just paid for it to re-read the whole project and
-        // conclude the same thing.
+        // Nothing was written, so there is nothing to verify.
         if wrote_nothing(&env) {
             // Ending the run here was too quick a surrender: the commonest way
             // to write nothing is to spend the round reading and drafting the
@@ -210,7 +222,7 @@ pub async fn run_task(
             // second empty round is treated as stuck.
             if !nudged {
                 nudged = true;
-                nudge = "\n\nYour last attempt changed no files: you explored the code and \
+                feedback = "\n\nYour last attempt changed no files: you explored the code and \
                          described the work instead of doing it. Do not plan again, and do not \
                          put file contents in your reply — they belong in a write_file or \
                          edit_file call. Start with the single most important file and edit it \
@@ -230,17 +242,59 @@ pub async fn run_task(
             return Ok(note);
         }
 
+        // The gate: verify deterministically rather than paying an LLM to read
+        // exit codes and relay them. This replaced an unconditional reviewer
+        // role whose entire verdict was discarded on the happy path anyway.
+        let _ = env.events.send(AgentEvent::Status { message: "checking".into() });
+        if let Some(report) = gate_check(&env).await {
+            // A compiler's own output is better feedback than an LLM's
+            // paraphrase of it, and it costs nothing to produce.
+            feedback = format!(
+                "\n\nThe project does not build, or its tests fail, after your last change. Fix \
+                 that before anything else — this is the output of the project's own toolchain, \
+                 not an opinion:\n\n{report}"
+            );
+            let touched = changed_files(&env);
+            if touched == before_round {
+                let note = format!(
+                    "{last}\n\n**Stopped after round {}:** the checks are still failing and the \
+                     last pass changed no files, so another round would repeat it.\n\n{report}",
+                    round + 1
+                );
+                let _ = env.events.send(AgentEvent::Done { summary: note.clone() });
+                return Ok(note);
+            }
+            before_round = touched;
+            unresolved = Some(report);
+            continue;
+        }
+        unresolved = None;
+
+        let changed = changed_files(&env);
+        // Checks pass. On a small change that is the whole verification story,
+        // so the run ends here having spent nothing on a reviewer. A larger
+        // change still gets one, because what is left to catch is semantic —
+        // work that compiles and is nonetheless half-done — and no type-checker
+        // sees that.
+        if changed_count(&env) < REVIEW_MIN_FILES {
+            let summary = non_empty(&last, &changed);
+            let _ = env.events.send(AgentEvent::Done { summary: summary.clone() });
+            return Ok(summary);
+        }
+
         let _ = env.events.send(AgentEvent::Status { message: "reviewer".into() });
         // Hand over the diff, not the project. The reviewer used to be given a
         // summary and left to re-read every file to find the change — the
         // single biggest source of duplicated reads in a run.
-        let changed = changed_files(&env);
         let review = spawn_role(
             AgentRole::Reviewer,
             format!(
                 "User task:\n{prompt}\n\nCoder summary:\n{last}\n\nFiles this run changed:\n\
-                 {changed}\n\nReview only those files and only what changed in them. Do not \
-                 read anything else. Start with APPROVED or REVISE."
+                 {changed}\n\nThe project already builds and its tests already pass — that is \
+                 checked before you are asked, so do not re-run checks and do not report on \
+                 them. Look only for work that is wrong or unfinished: something the task asked \
+                 for that these changes do not do. Review only those files and only what \
+                 changed in them. Do not read anything else. Start with APPROVED or REVISE."
             ),
             model.clone(),
             effort.clone(),
@@ -255,10 +309,10 @@ pub async fn run_task(
         )
         .await?;
         if review.to_ascii_uppercase().contains("APPROVED") {
-            // The reviewer is internal QA. Its verdict, the exit codes it
-            // quotes and its file-by-file notes answer nothing the user asked
-            // for, so a passing review ends the run silently and the coder's
-            // summary — the one that describes the change — is what ships.
+            // The reviewer is internal QA. Its verdict and its file-by-file
+            // notes answer nothing the user asked for, so a passing review ends
+            // the run silently and the coder's summary — the one that describes
+            // the change — is what ships.
             // A coder that ran out of turns mid-tool-call leaves no closing
             // text at all, and an empty bubble tells the user nothing about
             // work that did happen; name the files in that case.
@@ -266,6 +320,7 @@ pub async fn run_task(
             let _ = env.events.send(AgentEvent::Done { summary: summary.clone() });
             return Ok(summary);
         }
+        feedback = format!("\n\nA reviewer read your changes and asked for revisions:\n\n{review}");
         last = review.clone();
         // A REVISE round that changed nothing will not change anything next
         // time either — the loop was re-running the whole planner/coder pass
@@ -283,8 +338,52 @@ pub async fn run_task(
         }
         before_round = touched;
     }
-    let _ = env.events.send(AgentEvent::Done { summary: last.clone() });
-    Ok(last)
+    // Out of rounds. If the checks were still failing on the way out, that is
+    // the headline — not the coder's summary of what it meant to do.
+    let note = match unresolved {
+        Some(report) => format!(
+            "{last}\n\n**The project's checks are still failing after three rounds**, so this is \
+             unfinished rather than done:\n\n{report}"
+        ),
+        None => last.clone(),
+    };
+    let _ = env.events.send(AgentEvent::Done { summary: note.clone() });
+    Ok(note)
+}
+
+/// The coder's instructions for one round. Split out so a test can prove the
+/// previous round's feedback actually reaches it — the bug this replaced was
+/// invisible precisely because the prompt was built inline.
+fn coder_prompt(task: &str, plan: &str, note: &str, feedback: &str) -> String {
+    format!("User task:\n{task}\n\nPlan:\n{plan}\n\nImplement now.{note}{feedback}")
+}
+
+/// Run the project's own checks. `Some(report)` when something failed and the
+/// coder needs to see it; `None` when everything that could be verified passed.
+///
+/// Tests run only once the build is clean: a project that does not compile
+/// fails its tests for the same single reason, and reporting both just doubles
+/// the output the next round has to read.
+async fn gate_check(env: &RunEnv) -> Option<String> {
+    match agent::checks::check_code(&env.ws, &env.sandbox, &env.cancel).await {
+        Ok(c) if !c.passed => return Some(c.report),
+        Ok(_) => {}
+        // A check that could not start at all — missing toolchain, cancelled —
+        // is not evidence the code is broken. Sending the coder to fix a
+        // phantom build failure would be worse than not checking.
+        Err(e) => {
+            tracing::warn!("gate: check_code did not run ({e:#}); treating as unverified");
+            return None;
+        }
+    }
+    match agent::checks::run_tests(&env.ws, &env.sandbox, &env.cancel).await {
+        Ok(t) if !t.passed => Some(t.report),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!("gate: run_tests did not run ({e:#}); treating as unverified");
+            None
+        }
+    }
 }
 
 /// The coder's own words when it left any, otherwise the shortest honest
@@ -327,7 +426,6 @@ fn is_greeting(prompt: &str) -> bool {
 
 #[cfg(test)]
 mod loop_tests {
-    use super::*;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
@@ -383,6 +481,57 @@ mod loop_tests {
     fn substrings_of_longer_words_do_not_count() {
         assert!(!super::asks_for_a_change("what is the prefix used here?"));
         assert!(!super::asks_for_a_change("describe the buildings dataset"));
+    }
+
+    /// The gate picks the reviewer's fate from this count, so it has to agree
+    /// with the list `changed_files` renders — one counting the set and the
+    /// other formatting it must never disagree about how many there are.
+    #[test]
+    fn changed_count_agrees_with_the_rendered_list() {
+        for paths in [vec![], vec!["a.rs"], vec!["a.rs", "b.rs", "c.rs"]] {
+            let w = writes(&paths);
+            let listed = super::changed_files_from(&w);
+            let counted = w.lock().unwrap().len();
+            assert_eq!(counted, paths.len());
+            let rendered = if paths.is_empty() {
+                0
+            } else {
+                listed.lines().count()
+            };
+            assert_eq!(rendered, counted, "list and count disagree for {paths:?}");
+        }
+    }
+
+    /// The regression test for the loop that never closed: a reviewer's REVISE
+    /// and a failing build's output were computed and then dropped, so round
+    /// two re-sent round one's prompt verbatim. If feedback stops reaching the
+    /// coder again, this fails.
+    #[test]
+    fn the_next_round_carries_the_last_rounds_feedback() {
+        let first = super::coder_prompt("add a button", "1. edit App.tsx", "", "");
+        assert!(first.contains("add a button"));
+        assert!(first.contains("1. edit App.tsx"));
+        assert!(first.ends_with("Implement now."), "no feedback on round one: {first}");
+
+        let second = super::coder_prompt(
+            "add a button",
+            "1. edit App.tsx",
+            "",
+            "\n\nerror[E0425]: cannot find value `handleClick`",
+        );
+        assert!(
+            second.contains("E0425"),
+            "the failure has to reach the coder, or the round repeats: {second}"
+        );
+        assert_ne!(first, second, "a round with feedback must not repeat the last prompt");
+    }
+
+    /// Approve mode's note and the feedback are separate inputs and both have
+    /// to survive; an earlier version interpolated only one of them.
+    #[test]
+    fn the_mode_note_and_the_feedback_both_survive() {
+        let p = super::coder_prompt("t", "p", " SHELL-WITHHELD", " FEEDBACK");
+        assert!(p.contains("SHELL-WITHHELD") && p.contains("FEEDBACK"), "{p}");
     }
 
     #[test]
@@ -487,6 +636,12 @@ fn wrote_nothing(env: &RunEnv) -> bool {
 /// The paths this run touched, as a list for the reviewer to bound itself to.
 fn changed_files(env: &RunEnv) -> String {
     changed_files_from(&env.writes)
+}
+
+/// How many distinct files this task has written — the same set
+/// `changed_files` formats, counted rather than rendered.
+fn changed_count(env: &RunEnv) -> usize {
+    env.writes.lock().map(|w| w.len()).unwrap_or(0)
 }
 
 /// Split from `changed_files` so the ordering and the no-progress comparison
