@@ -42,7 +42,7 @@ cli/           axum HTTP + websockets, SQLite session store, embedded UI
   main.rs        the desktop window (tao + wry); the server runs behind it
   routes.rs      every endpoint; /ws/agent, /ws/shell, /ws/files
   icon.py        redraws the app's brand mark into icon.ico (exe + window icon)
-orchestrator/  run modes: which agents run, in what order, with which permissions
+orchestrator/  run modes: one agent loop per task, permissions per mode, build/test gate
 agent/         the model loop, tools, providers, skills, compaction
   loop_.rs       the agentic loop: stream → tool calls → repeat
   tools.rs       every tool the model can call
@@ -105,20 +105,45 @@ and never has to explain that it cannot.
 
 **Primary** (you talk to these): `build` (unrestricted), `plan` (no edits, asks
 before running).
-**Subagents** (delegated to via the `task` tool): `explore` (read-only codebase),
-`scout` (read-only, external docs), `general` (full tools).
+**Subagents**: `explore` (read-only codebase), `scout` (read-only, external
+docs), `general` (full tools, but never more than the agent that started it).
 
-A subagent runs in its own context and returns only its final message. It gets no
-runner of its own, so delegation cannot recurse.
+The task loop follows [Codex](https://github.com/openai/codex): **one agent works
+the whole task in one conversation** — it plans with `todo_write`, edits,
+verifies, and replies. There is no planner → coder → reviewer hand-off; each of
+those roles used to start from an empty context and re-read the same files.
+After an Auto/Approve run edits anything, the project's own build and tests run;
+a failure goes back into the same conversation for up to two fix passes.
 
-The composer's Auto / Plan / Manual / Approve modes are presets over this.
+Multi-agent, Codex-style:
+
+- `spawn_agent` starts a subagent in the background and returns its id at once;
+  up to 6 run in parallel. `wait_agent` returns as soon as one finishes;
+  `close_agent` stops one. They show as an **Agents** card in the feed.
+- `task` is the blocking form: delegate and wait for the answer.
+- Read-only tool calls in one turn (reads, searches, fetches, delegation) run
+  concurrently when none needs approval.
+
+A subagent runs in its own context and returns only its final message. It has no
+delegation tools, so it cannot recurse, and its streamed text stays private.
+
+The composer's modes are permission presets over the same loop (Codex's approval
+policies): **Auto** (full tools, no prompts), **Plan** (read-only), **Manual**
+(every shell command asks), **Approve** (edits, no shell).
+
+`AGENTS.md` at the workspace root (or `CLAUDE.md`) is read into every
+conversation as the repository's own instructions, up to 32 KB.
 
 ### Tools
 
 `read_file` (with offset/limit), `write_file`, `edit_file`, `list_files`,
 `search_files`, `run_command` (foreground or background), `check_code`,
 `run_tests`, `web_search`, `web_fetch`, `browser_open`, `todo_write`,
-`ask_user`, `task`, `skill`.
+`ask_user`, `task`, `spawn_agent`, `wait_agent`, `close_agent`, `skill`.
+
+The terminal panel renders ANSI colours, redraws `\r` progress bars in place,
+keeps ↑/↓ command history across reloads, and clears with `clear`, `cls` or
+Ctrl+L.
 
 ---
 
@@ -207,22 +232,19 @@ directory (`create-next-app` refuses to scaffold into one).
 ```powershell
 cargo test --workspace            # Rust
 cd frontend; npx tsc --noEmit     # types
-node lib/browser.test.mjs; node lib/feed.test.mjs
+node lib/browser.test.mjs; node lib/feed.test.mjs; node lib/log.test.mjs
 node lib/speech.test.mjs; node lib/terminal.test.mjs
 ```
 
 `&&` is not a statement separator in Windows PowerShell 5.1 - chain with `;`,
 or `; if ($?) { ... }` when the next step depends on the last one succeeding.
 
-Frontend tests are plain `node` scripts with `assert` — no framework. The working
-ones mirror the source logic rather than importing it, because the source is
-TypeScript and there is no compile step for `lib/`.
-
-Two files do not run and are excluded above: `lib/log.test.mjs` and
-`lib/store.test.mjs` both `await import()` a compiled `./log.js` / `./store.js`
-that nothing generates. `store.test.mjs` is stale as well as unbuilt — it imports
-`loadSessions`, which was renamed to `loadAllSessions`. They need converting to
-the mirror convention (or a build step) before they guard anything.
+Frontend tests are plain `node` scripts with `assert` — no framework.
+`log.test.mjs` imports `lib/log.ts` directly through Node 22+'s built-in type
+stripping, so it tests the real source; prefer that for new tests of `.ts`
+modules. The older ones mirror the logic they check instead, because `.tsx`
+cannot be loaded that way. `store.test.mjs` is stale (it imports
+`loadSessions`, since renamed `loadAllSessions`) and is excluded above.
 
 ---
 

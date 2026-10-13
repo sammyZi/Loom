@@ -121,4 +121,51 @@ assert.equal(appendChunk("keep", { type: "token", text: "x" }), "keep");
 // share the `cwd> ` format, so a change to one has to move the other
 assert.equal(splitLog(a, CWD)[0].kind, "prompt");
 
+// same logic as parseAnsi / applyCarriageReturns in components/TerminalPanel.tsx
+const ANSI = /\x1b\[([0-9;?]*)([A-Za-z])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]/g;
+function parseAnsi(s) {
+  const out = [];
+  let fg;
+  let bold = false;
+  let last = 0;
+  const push = (text) => {
+    if (!text) return;
+    const prev = out[out.length - 1];
+    if (prev && prev.fg === fg && !!prev.bold === bold) prev.text += text;
+    else out.push({ text, fg, bold });
+  };
+  for (const m of s.matchAll(ANSI)) {
+    push(s.slice(last, m.index));
+    last = (m.index ?? 0) + m[0].length;
+    if (m[2] !== "m") continue;
+    const codes = (m[1] || "0").split(";").map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0) {
+        fg = undefined;
+        bold = false;
+      } else if (c === 1) bold = true;
+      else if (c === 22) bold = false;
+      else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) fg = c;
+      else if (c === 39) fg = undefined;
+      else if (c === 38 || c === 48) i += codes[i + 1] === 5 ? 2 : codes[i + 1] === 2 ? 4 : 0;
+    }
+  }
+  push(s.slice(last));
+  return out;
+}
+const applyCR = (s) => s.replace(/\r\n/g, "\n").replace(/[^\n]*\r(?=[^\n])/g, "");
+
+// colour becomes a span, reset ends it, and no escape bytes survive
+const sp = parseAnsi("ok \x1b[32mPASS\x1b[0m done");
+assert.deepEqual(sp.map((x) => [x.text, x.fg]), [["ok ", undefined], ["PASS", 32], [" done", undefined]]);
+// bold + bright, then 256-colour args are skipped rather than read as colours
+// (one merged span: 38;5;32 must not be read as fg=32)
+assert.deepEqual(parseAnsi("\x1b[1;91mE\x1b[38;5;32mx"), [{ text: "Ex", fg: 91, bold: true }]);
+// cursor moves and OSC titles are dropped entirely
+assert.equal(parseAnsi("a\x1b[2Kb\x1b]0;title\x07c").map((x) => x.text).join(""), "abc");
+// progress bars: a lone \r overwrites, \r\n is just a newline
+assert.equal(applyCR("10%\r50%\r100%\ndone\r\n"), "100%\ndone\n");
+assert.equal(applyCR("a\r\nb"), "a\nb");
+
 console.log("terminal: all checks passed");

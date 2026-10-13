@@ -76,11 +76,50 @@ pub struct ToolCtx {
     /// Content each written path had the first time this task touched it —
     /// `None` means it did not exist yet. Backs "undo this message".
     pub before: Arc<std::sync::Mutex<HashMap<String, Option<String>>>>,
+    /// Background subagents started with spawn_agent this conversation.
+    pub agents: AgentPool,
 }
 
-/// Roughly 15k tokens of source. Enough to read a handful of files whole, not
-/// enough to swallow a project.
-pub const READ_BUDGET_BYTES: usize = 60_000;
+/// Codex-style background subagents: spawn_agent starts one and returns at
+/// once, wait_agent collects answers, close_agent cancels. One pool per
+/// conversation; anything still running when the conversation ends is closed.
+#[derive(Clone, Default)]
+pub struct AgentPool {
+    slots: Arc<std::sync::Mutex<std::collections::BTreeMap<String, AgentSlot>>>,
+    seq: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct AgentSlot {
+    agent: &'static str,
+    cancel: CancellationToken,
+    /// None while running; Some(answer or error text) once finished.
+    result: Option<std::result::Result<String, String>>,
+    /// Already handed back by wait_agent, or closed.
+    collected: bool,
+}
+
+impl AgentPool {
+    /// Codex defaults to six concurrent threads; same here.
+    pub const MAX_RUNNING: usize = 6;
+
+    fn running(&self) -> usize {
+        self.slots.lock().unwrap().values().filter(|s| s.result.is_none() && !s.collected).count()
+    }
+
+    /// Cancel everything still running. Called when the owning conversation
+    /// ends: an answer nobody will wait for is wasted tokens.
+    pub fn close_all(&self) {
+        for s in self.slots.lock().unwrap().values_mut() {
+            if s.result.is_none() {
+                s.cancel.cancel();
+            }
+        }
+    }
+}
+
+/// Roughly 30k tokens of source. Enough to read multiple files whole, not
+/// enough to swallow an entire repository.
+pub const READ_BUDGET_BYTES: usize = 120_000;
 
 fn content_hash(s: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -187,10 +226,20 @@ impl ToolRegistry {
                 Box::new(TodoWrite),
                 Box::new(AskUser),
                 Box::new(Task),
+                Box::new(SpawnAgent),
+                Box::new(WaitAgent),
+                Box::new(CloseAgent),
                 Box::new(LoadSkill),
                 Box::new(OpenBrowser),
             ],
         }
+    }
+
+    /// Drop tools by name — how a subagent loses the delegation tools, so a
+    /// child can never spawn children.
+    pub fn without(mut self, names: &[&str]) -> Self {
+        self.tools.retain(|t| !names.contains(&t.name()));
+        self
     }
 
     /// Everything except shell access, for the mode where the user runs commands.
@@ -314,6 +363,9 @@ struct WriteFile;
 struct TodoWrite;
 struct AskUser;
 struct Task;
+struct SpawnAgent;
+struct WaitAgent;
+struct CloseAgent;
 struct LoadSkill;
 struct OpenBrowser;
 
@@ -792,6 +844,10 @@ fn collapse_ws(s: &str) -> String {
 }
 
 const SEARCH_MATCH_CAP: usize = 400;
+/// Past this many hits the lines are replaced by a per-file count. SWE-agent's
+/// ablation found a short file list beat grep-style context dumps: a wall of
+/// matches buries the one that matters and spends the context on noise.
+const SEARCH_LIST_MAX: usize = 50;
 const SEARCH_OUT_CAP: usize = 24_000;
 const SEARCH_FILE_CAP: u64 = 512_000;
 
@@ -844,7 +900,7 @@ impl Tool for SearchFiles {
             let needle = if ci { query.to_lowercase() } else { query.clone() };
             let mut out = String::new();
             let mut total = 0usize;
-            let mut files_hit = 0usize;
+            let mut counts: Vec<(String, usize)> = Vec::new();
             for f in files {
                 if total >= SEARCH_MATCH_CAP || out.len() >= SEARCH_OUT_CAP {
                     break;
@@ -893,7 +949,7 @@ impl Tool for SearchFiles {
                     }
                 }
                 if per_file > 0 {
-                    files_hit += 1;
+                    counts.push((f.clone(), per_file));
                 }
                 // Checked every file, not only the ones that matched: a query
                 // with no hits across a large tree was the one case Stop could
@@ -905,17 +961,33 @@ impl Tool for SearchFiles {
             if total == 0 {
                 return Ok(format!("no matches for {query:?}"));
             }
-            out.push_str(&format!(
-                "\n{total} match(es) across {files_hit} file(s)"
-            ));
-            if total >= SEARCH_MATCH_CAP {
-                out.push_str(" (capped — refine the query)");
-            }
-            Ok(out)
+            Ok(search_report(&query, out, total, counts))
         })
         .await
         .context("search join")?
     }
+}
+
+/// Lines when there are few hits; a per-file count when there are many.
+fn search_report(query: &str, lines: String, total: usize, mut counts: Vec<(String, usize)>) -> String {
+    let capped = if total >= SEARCH_MATCH_CAP { "+" } else { "" };
+    if total <= SEARCH_LIST_MAX {
+        return format!("{lines}\n{total} match(es) across {} file(s)", counts.len());
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let shown = counts.len().min(30);
+    let mut out = format!(
+        "{total}{capped} matches for {query:?} in {} files — too many to list. Narrow the query \
+         (a longer phrase, `ext`, case_sensitive) or read_file the likely file.\n",
+        counts.len()
+    );
+    for (f, n) in &counts[..shown] {
+        out.push_str(&format!("{f}: {n}\n"));
+    }
+    if counts.len() > shown {
+        out.push_str(&format!("… {} more files\n", counts.len() - shown));
+    }
+    out
 }
 
 #[async_trait]
@@ -1065,12 +1137,14 @@ impl Tool for WriteFile {
         let before = viewer::read_file(&ctx.ws, path).ok();
         ctx.note_before(path, before.as_deref());
         let existed = before.is_some();
+        guard_json(path, before.as_deref(), content)?;
         viewer::write_file(&ctx.ws, path, content)?;
         ctx.note_write(path);
         Ok(format!(
-            "{} {path} ({} lines)",
+            "{} {path} ({} lines){}",
             if existed { "overwrote" } else { "created" },
-            content.lines().count()
+            content.lines().count(),
+            bracket_warning(path, before.as_deref(), content)
         ))
     }
 }
@@ -1240,17 +1314,11 @@ impl Tool for EditFile {
         } else {
             existing.unwrap_or_default()
         };
-        let after = if old.is_empty() {
-            new.to_string()
-        } else {
-            if !before.contains(old) {
-                anyhow::bail!("old_text not found in {path}");
-            }
-            before.replacen(old, new, 1)
-        };
+        let after = perform_edit(path, &before, old, new)?;
         if before == after {
             return Ok("no changes".into());
         }
+        guard_json(path, Some(&before), &after)?;
         viewer::write_file(&ctx.ws, path, &after)?;
         ctx.note_write(path);
         let diff = unified_diff(path, &before, &after);
@@ -1258,8 +1326,172 @@ impl Tool for EditFile {
             path: path.to_string(),
             diff: diff.clone(),
         });
-        Ok(diff)
+        Ok(format!("{diff}{}", bracket_warning(path, Some(&before), &after)))
     }
+}
+
+/// SWE-agent's edit guardrail: an edit that breaks the file's syntax is
+/// refused and the file left as it was, because a model that writes broken code
+/// tends to compound it instead of noticing. JSON is checked exactly — only
+/// when it parsed before, so JSON-with-comments files (tsconfig) are left alone.
+fn guard_json(path: &str, before: Option<&str>, after: &str) -> Result<()> {
+    if !path.to_ascii_lowercase().ends_with(".json") {
+        return Ok(());
+    }
+    let was_valid = before.is_some_and(|b| serde_json::from_str::<Value>(b).is_ok());
+    if let (true, Err(e)) = (was_valid, serde_json::from_str::<Value>(after)) {
+        anyhow::bail!(
+            "edit refused: {path} would no longer be valid JSON ({e}). The file is unchanged; \
+             fix the edit and try again."
+        );
+    }
+    Ok(())
+}
+
+/// The cheap, language-agnostic half of the guardrail: a correct edit almost
+/// never changes how many (), [] and {} are left open. Brackets inside strings
+/// make this a hint rather than proof, so it warns instead of refusing.
+fn bracket_warning(path: &str, before: Option<&str>, after: &str) -> String {
+    const CODE: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "css", "scss", "go", "java", "kt",
+        "c", "h", "cc", "cpp", "hpp", "cs", "py", "swift", "php", "dart", "vue", "svelte",
+    ];
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !CODE.contains(&ext.as_str()) {
+        return String::new();
+    }
+    let net = |s: &str| {
+        let mut n = [0i64; 3];
+        for c in s.chars() {
+            match c {
+                '(' => n[0] += 1,
+                ')' => n[0] -= 1,
+                '[' => n[1] += 1,
+                ']' => n[1] -= 1,
+                '{' => n[2] += 1,
+                '}' => n[2] -= 1,
+                _ => {}
+            }
+        }
+        n
+    };
+    let was = before.map(net).unwrap_or([0; 3]);
+    let now = net(after);
+    let off: Vec<String> = ["()", "[]", "{}"]
+        .iter()
+        .zip(was.iter().zip(now.iter()))
+        .filter(|(_, (w, n))| w != n)
+        .map(|(b, (w, n))| format!("{b} {:+}", n - w))
+        .collect();
+    if off.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nwarning: this changed the bracket balance of {path} ({}). Check the edited region \
+         for a missing or extra bracket before moving on.",
+        off.join(", ")
+    )
+}
+
+/// Replace `old` with `new` in `before`.
+/// Handles CRLF vs LF line endings and trailing whitespace discrepancies.
+/// Also checks for multiple occurrences to avoid ambiguous replacements.
+fn perform_edit(path: &str, before: &str, old: &str, new: &str) -> Result<String> {
+    if old.is_empty() {
+        return Ok(new.to_string());
+    }
+
+    // 1. Exact match attempt
+    let matches = before.matches(old).count();
+    if matches == 1 {
+        return Ok(before.replacen(old, new, 1));
+    }
+    if matches > 1 {
+        anyhow::bail!(
+            "old_text matches {matches} locations in {path}. Provide more surrounding lines \
+             in old_text to uniquely identify the target location."
+        );
+    }
+
+    // 2. Line ending normalization (CRLF vs LF)
+    let is_crlf = before.contains("\r\n");
+    let before_lf = before.replace("\r\n", "\n");
+    let old_lf = old.replace("\r\n", "\n");
+    let new_lf = new.replace("\r\n", "\n");
+
+    let matches_lf = before_lf.matches(&old_lf).count();
+    if matches_lf == 1 {
+        let after_lf = before_lf.replacen(&old_lf, &new_lf, 1);
+        return Ok(if is_crlf {
+            after_lf.replace('\n', "\r\n")
+        } else {
+            after_lf
+        });
+    }
+    if matches_lf > 1 {
+        anyhow::bail!(
+            "old_text matches {matches_lf} locations in {path}. Provide more surrounding lines \
+             in old_text to uniquely identify the target location."
+        );
+    }
+
+    // 3. Trailing whitespace tolerance: compare lines with trimmed line ends
+    if let Some(after_ws) = replace_ignoring_trailing_whitespace(&before_lf, &old_lf, &new_lf) {
+        return Ok(if is_crlf {
+            after_ws.replace('\n', "\r\n")
+        } else {
+            after_ws
+        });
+    }
+
+    anyhow::bail!(
+        "old_text not found in {path}. Ensure old_text matches the existing file contents \
+         including exact indentation and whitespace. Use read_file to check the latest contents."
+    )
+}
+
+fn replace_ignoring_trailing_whitespace(before: &str, old: &str, new: &str) -> Option<String> {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let old_lines: Vec<&str> = old.lines().collect();
+    if old_lines.is_empty() || old_lines.len() > before_lines.len() {
+        return None;
+    }
+
+    let mut match_idx: Option<usize> = None;
+    for i in 0..=(before_lines.len() - old_lines.len()) {
+        let mut matches = true;
+        for j in 0..old_lines.len() {
+            if before_lines[i + j].trim_end() != old_lines[j].trim_end() {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            if match_idx.is_some() {
+                // Ambiguous / multiple matches
+                return None;
+            }
+            match_idx = Some(i);
+        }
+    }
+
+    let start = match_idx?;
+    let mut result_lines = Vec::new();
+    result_lines.extend_from_slice(&before_lines[..start]);
+    for line in new.lines() {
+        result_lines.push(line);
+    }
+    result_lines.extend_from_slice(&before_lines[start + old_lines.len()..]);
+
+    let mut out = result_lines.join("\n");
+    if before.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Foreground cap for the agent's own commands. Was 120s and killed ordinary
@@ -1513,33 +1745,243 @@ impl Tool for Task {
         if cancel.is_cancelled() {
             anyhow::bail!("cancelled");
         }
-        let id = input["agent"].as_str().unwrap_or("").trim().to_ascii_lowercase();
-        let prompt = input["prompt"].as_str().unwrap_or("").trim().to_string();
-        if prompt.is_empty() {
-            anyhow::bail!("prompt required");
-        }
-        let Some(def) = crate::agents::agent_def(&id) else {
-            anyhow::bail!("unknown agent `{id}`");
+        let (def, prompt, runner) = match resolve_subagent(ctx, &input) {
+            Ok(v) => v,
+            Err(refusal) => return refusal,
         };
-        if !matches!(def.mode, crate::agents::AgentMode::Subagent | crate::agents::AgentMode::All) {
-            anyhow::bail!("`{id}` is a primary agent and cannot be delegated to");
-        }
-        // The parent's own permissions still bound the child: a plan-mode agent
-        // must not be able to reach the shell by delegating to `general`.
-        if ctx.perms.decide("task", &id) == Permission::Deny {
-            return Ok(format!("refused: delegating to `{id}` is denied for this agent."));
-        }
         let _ = ctx.events.send(AgentEvent::Status {
             message: format!("{} subagent", def.label),
         });
-        let runner = ctx
-            .spawn_subagent
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("subagents are not available in this run"))?;
         let out = runner(def, prompt, cancel.clone()).await?;
         // Only the final answer comes back; the child's tool traffic stays in
         // its own context, which is the whole point of delegating.
         Ok(out)
+    }
+}
+
+/// Shared front half of `task` and `spawn_agent`: which agent, what prompt,
+/// and whether this agent may delegate to it at all. `Err` carries the
+/// result to hand straight back to the model.
+#[allow(clippy::type_complexity)]
+fn resolve_subagent(
+    ctx: &ToolCtx,
+    input: &Value,
+) -> std::result::Result<(&'static crate::agents::AgentDef, String, SubagentRunner), Result<String>> {
+    let id = input["agent"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+    let prompt = input["prompt"].as_str().unwrap_or("").trim().to_string();
+    if prompt.is_empty() {
+        return Err(Err(anyhow::anyhow!("prompt required")));
+    }
+    let Some(def) = crate::agents::agent_def(&id) else {
+        return Err(Err(anyhow::anyhow!("unknown agent `{id}`")));
+    };
+    if !matches!(def.mode, crate::agents::AgentMode::Subagent | crate::agents::AgentMode::All) {
+        return Err(Err(anyhow::anyhow!("`{id}` is a primary agent and cannot be delegated to")));
+    }
+    // The parent's own permissions still bound the child: a plan-mode agent
+    // must not be able to reach the shell by delegating to `general`.
+    if ctx.perms.decide("task", &id) == Permission::Deny {
+        return Err(Ok(format!("refused: delegating to `{id}` is denied for this agent.")));
+    }
+    let Some(runner) = ctx.spawn_subagent.clone() else {
+        return Err(Err(anyhow::anyhow!("subagents are not available in this run")));
+    };
+    Ok((def, prompt, runner))
+}
+
+#[async_trait]
+impl Tool for SpawnAgent {
+    fn name(&self) -> &'static str {
+        "spawn_agent"
+    }
+    fn description(&self) -> &'static str {
+        "Start a subagent in the background and get its id back immediately, so several run in \
+         parallel while you keep working. Agents: `explore` (find code), `scout` (external \
+         docs), `general` (multi-step work with full tools). Give each a self-contained prompt — \
+         it cannot see this conversation — and never give two agents edits to the same file. \
+         Collect answers with wait_agent."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "agent": { "type": "string", "enum": ["explore", "scout", "general"] },
+                "prompt": { "type": "string", "description": "The whole task, self-contained." }
+            },
+            "required": ["agent", "prompt"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, cancel: &CancellationToken) -> Result<String> {
+        let (def, prompt, runner) = match resolve_subagent(ctx, &input) {
+            Ok(v) => v,
+            Err(refusal) => return refusal,
+        };
+        if ctx.agents.running() >= AgentPool::MAX_RUNNING {
+            return Ok(format!(
+                "refused: {} subagents are already running. wait_agent for one to finish first.",
+                AgentPool::MAX_RUNNING
+            ));
+        }
+        let n = ctx.agents.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let id = format!("{}-{n}", def.id);
+        // A child of the run's token: Stop still reaches every subagent.
+        let child = cancel.child_token();
+        ctx.agents.slots.lock().unwrap().insert(
+            id.clone(),
+            AgentSlot { agent: def.id, cancel: child.clone(), result: None, collected: false },
+        );
+        let _ = ctx.events.send(AgentEvent::Subagent {
+            id: id.clone(),
+            agent: def.id.into(),
+            status: "running".into(),
+            summary: first_line(&prompt),
+        });
+        let fut = runner(def, prompt, child);
+        let pool = ctx.agents.clone();
+        let events = ctx.events.clone();
+        let task_id = id.clone();
+        tokio::spawn(async move {
+            let r = fut.await.map_err(|e| format!("{e:#}"));
+            let summary = match &r {
+                Ok(s) | Err(s) => first_line(s),
+            };
+            let status = if r.is_ok() { "done" } else { "failed" };
+            let closed = {
+                let mut slots = pool.slots.lock().unwrap();
+                match slots.get_mut(&task_id) {
+                    // A closed agent stays closed; its late answer is dropped.
+                    Some(slot) if !slot.collected => {
+                        slot.result = Some(r);
+                        false
+                    }
+                    _ => true,
+                }
+            };
+            if !closed {
+                let _ = events.send(AgentEvent::Subagent {
+                    id: task_id,
+                    agent: def.id.into(),
+                    status: status.into(),
+                    summary,
+                });
+            }
+        });
+        Ok(format!(
+            "spawned `{id}`. It runs in the background; keep working and call wait_agent when you \
+             need its answer."
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for WaitAgent {
+    fn name(&self) -> &'static str {
+        "wait_agent"
+    }
+    fn description(&self) -> &'static str {
+        "Wait for spawned subagents. Returns as soon as at least one has finished, with every \
+         finished answer not collected yet. Omit `ids` to wait on all of yours."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "ids": { "type": "array", "items": { "type": "string" } },
+                "timeout_secs": { "type": "integer", "description": "Default 300, max 1800" }
+            }
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, cancel: &CancellationToken) -> Result<String> {
+        let want: Vec<String> = input["ids"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let secs = input["timeout_secs"].as_u64().unwrap_or(300).clamp(1, 1800);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        loop {
+            if let Some(out) = collect_finished(&ctx.agents, &want, tokio::time::Instant::now() >= deadline) {
+                return Ok(out);
+            }
+            // ponytail: 200ms poll instead of a Notify; switch if waits ever need to be instant.
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+            }
+        }
+    }
+}
+
+/// One wait_agent check. `Some` ends the wait: finished answers, nothing left
+/// to wait for, or the deadline passed. `None` means keep waiting.
+fn collect_finished(pool: &AgentPool, want: &[String], timed_out: bool) -> Option<String> {
+    let mut slots = pool.slots.lock().unwrap();
+    let mut waiting = Vec::new();
+    let mut done = Vec::new();
+    for (id, slot) in slots.iter_mut() {
+        if slot.collected || !(want.is_empty() || want.contains(id)) {
+            continue;
+        }
+        match slot.result.take() {
+            Some(r) => {
+                slot.collected = true;
+                done.push(match r {
+                    Ok(answer) => format!("## {id} ({}) finished\n{answer}", slot.agent),
+                    Err(e) => format!("## {id} ({}) failed\n{e}", slot.agent),
+                });
+            }
+            None => waiting.push(id.clone()),
+        }
+    }
+    if !done.is_empty() {
+        if !waiting.is_empty() {
+            done.push(format!("Still running: {}", waiting.join(", ")));
+        }
+        return Some(done.join("\n\n"));
+    }
+    if waiting.is_empty() {
+        return Some("no subagents are running or waiting to be collected".into());
+    }
+    timed_out.then(|| format!("timed out; still running: {}", waiting.join(", ")))
+}
+
+#[async_trait]
+impl Tool for CloseAgent {
+    fn name(&self) -> &'static str {
+        "close_agent"
+    }
+    fn description(&self) -> &'static str {
+        "Stop a spawned subagent you no longer need."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, ctx: &ToolCtx, input: Value, _cancel: &CancellationToken) -> Result<String> {
+        let id = input["id"].as_str().unwrap_or("");
+        let mut slots = ctx.agents.slots.lock().unwrap();
+        let Some(slot) = slots.get_mut(id) else {
+            return Ok(format!("no subagent `{id}`"));
+        };
+        slot.cancel.cancel();
+        slot.collected = true;
+        let _ = ctx.events.send(AgentEvent::Subagent {
+            id: id.into(),
+            agent: slot.agent.into(),
+            status: "closed".into(),
+            summary: String::new(),
+        });
+        Ok(format!("closed `{id}`"))
+    }
+}
+
+fn first_line(s: &str) -> String {
+    let line = s.trim().lines().next().unwrap_or("").trim();
+    match line.char_indices().nth(140) {
+        Some((i, _)) => format!("{}…", &line[..i]),
+        None => line.to_string(),
     }
 }
 
@@ -1770,6 +2212,14 @@ impl Tool for RunTests {
 /// stdout crowd out the stderr that actually names the error.
 pub(crate) fn format_cmd(out: CommandOutput) -> Result<String> {
     use crate::context::clip_output;
+    // An empty result reads as "did it even run?" and invites a rerun.
+    if out.stdout.trim().is_empty() && out.stderr.trim().is_empty() {
+        return Ok(format!(
+            "exit {}\n(the command {} and printed no output)",
+            out.exit_code,
+            if out.exit_code == 0 { "succeeded" } else { "failed" }
+        ));
+    }
     Ok(format!(
         "exit {}\nstdout:\n{}\nstderr:\n{}",
         out.exit_code,
@@ -1939,6 +2389,7 @@ mod tool_tests {
             writes: Default::default(),
             read_budget: Default::default(),
             before: Default::default(),
+            agents: Default::default(),
         }
     }
 
@@ -1950,7 +2401,7 @@ mod tool_tests {
         let root = std::env::temp_dir().join("ide-ai-read-budget-test");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let big = "x".repeat(25_000);
+        let big = "x".repeat(50_000);
         for n in ["a.txt", "b.txt", "c.txt", "d.txt"] {
             std::fs::write(root.join(n), &big).unwrap();
         }
@@ -1964,7 +2415,7 @@ mod tool_tests {
         // Under budget: real content.
         assert!(read("a.txt").await.contains("xxx"));
         assert!(read("b.txt").await.contains("xxx"));
-        // 50 KB spent; the next whole-file read crosses 60 KB and is refused.
+        // 100 KB spent; the next whole-file read crosses 120 KB and is refused.
         let refused = read("c.txt").await;
         assert!(refused.starts_with("refused:"), "{}", &refused[..80.min(refused.len())]);
         assert!(refused.contains("budget"), "{refused}");
@@ -2126,6 +2577,96 @@ there
             .map(|t| t.name())
             .collect();
         assert!(names.contains(&"run_command"), "ask must not hide the tool");
+    }
+
+    #[test]
+    fn edit_file_crlf_matching() {
+        let before = "line1\r\nline2\r\nline3\r\n";
+        let old = "line2\n";
+        let new = "new_line2\n";
+        let res = perform_edit("test.rs", before, old, new).unwrap();
+        assert_eq!(res, "line1\r\nnew_line2\r\nline3\r\n");
+    }
+
+    #[test]
+    fn edit_file_whitespace_tolerance() {
+        let before = "fn foo() {   \n    bar();\n}\n";
+        let old = "fn foo() {\n    bar();\n}";
+        let new = "fn foo() {\n    baz();\n}";
+        let res = perform_edit("test.rs", before, old, new).unwrap();
+        assert!(res.contains("baz();"));
+    }
+
+    #[test]
+    fn edit_file_multiple_matches_rejected() {
+        let before = "item\nitem\nitem\n";
+        let err = perform_edit("test.rs", before, "item", "replacement").unwrap_err();
+        assert!(err.to_string().contains("matches 3 locations"));
+    }
+
+    /// Two spawned agents must actually run at the same time (the barrier
+    /// only opens when both are in flight), and each answer is handed back
+    /// exactly once.
+    #[tokio::test]
+    async fn spawned_agents_run_concurrently_and_are_collected_once() {
+        let root = std::env::temp_dir().join("ide-ai-spawn-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut ctx = test_ctx(&root);
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        ctx.spawn_subagent = Some(Arc::new(move |def, prompt, _cancel| {
+            let barrier = barrier.clone();
+            Box::pin(async move {
+                barrier.wait().await;
+                Ok(format!("{} says {prompt}", def.id))
+            })
+        }));
+        let c = CancellationToken::new();
+        SpawnAgent.call(&ctx, json!({"agent": "explore", "prompt": "a"}), &c).await.unwrap();
+        SpawnAgent.call(&ctx, json!({"agent": "scout", "prompt": "b"}), &c).await.unwrap();
+        let mut got = String::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !(got.contains("explore says a") && got.contains("scout says b")) {
+                got += &WaitAgent.call(&ctx, json!({}), &c).await.unwrap();
+            }
+        })
+        .await
+        .expect("both agents finish, so they ran concurrently");
+        let again = WaitAgent.call(&ctx, json!({}), &c).await.unwrap();
+        assert!(again.contains("no subagents"), "{again}");
+    }
+
+    #[test]
+    fn json_edits_that_break_the_file_are_refused() {
+        assert!(guard_json("a.json", Some("{\"a\":1}"), "{\"a\":1,}").is_err());
+        assert!(guard_json("a.json", Some("{\"a\":1}"), "{\"a\":2}").is_ok());
+        // JSON-with-comments never parsed, so it is not ours to judge
+        assert!(guard_json("tsconfig.json", Some("{/*x*/}"), "{/*x*/,}").is_ok());
+        assert!(guard_json("a.ts", Some("x"), "{{{").is_ok());
+    }
+
+    #[test]
+    fn bracket_balance_changes_are_flagged_only_for_code() {
+        let w = bracket_warning("a.ts", Some("f() {\n}\n"), "f() {\n  if (x) {\n}\n");
+        assert!(w.contains("{} +1"), "{w}");
+        assert!(bracket_warning("a.ts", Some("f() {}"), "g(1) { h(); }").is_empty());
+        assert!(bracket_warning("notes.md", None, "(((").is_empty());
+        assert!(bracket_warning("new.rs", None, "fn f() {").contains("{} +1"));
+    }
+
+    #[test]
+    fn many_search_hits_become_a_file_list() {
+        let few = search_report("q", "a.rs:1: q\n".into(), 1, vec![("a.rs".into(), 1)]);
+        assert!(few.contains("a.rs:1: q"), "{few}");
+        let counts = (0..60).map(|i| (format!("f{i}.rs"), 1)).collect();
+        let many = search_report("q", "lines".into(), 60, counts);
+        assert!(!many.contains("lines") && many.contains("too many to list"), "{many}");
+        assert!(many.contains("… 30 more files"), "{many}");
+    }
+
+    #[test]
+    fn silent_commands_say_so() {
+        let ok = format_cmd(CommandOutput { exit_code: 0, stdout: String::new(), stderr: " ".into() });
+        assert!(ok.unwrap().contains("succeeded and printed no output"));
     }
 }
 

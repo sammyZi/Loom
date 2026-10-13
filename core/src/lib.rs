@@ -272,6 +272,15 @@ pub enum AgentEvent {
     Browse { url: String },
     /// Completion tokens reported by the provider for one model call.
     Usage { tokens: u64 },
+    /// A background subagent changed state (Codex-style spawn_agent).
+    /// `status` is "running" | "done" | "failed" | "closed"; `summary` is the
+    /// task while running and the final answer's first line after.
+    Subagent {
+        id: String,
+        agent: String,
+        status: String,
+        summary: String,
+    },
     Done { summary: String },
     Error { message: String },
     /// Every file this run wrote, mapped to what it held right before this

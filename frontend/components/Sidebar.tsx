@@ -7,8 +7,6 @@ import {
   IconClose,
   IconFolder,
   IconGear,
-  IconMark,
-  IconPanel,
   IconPlus,
   IconDots,
   IconSearch,
@@ -133,19 +131,26 @@ export function Sidebar({
     <aside className={`sidebar ${open ? "" : "off"}`}>
       {menuFor && <div className="menu-backdrop" onClick={() => setMenuFor(null)} />}
 
-      <div className="side-top">
-        <IconMark />
-        <span className="side-name">Loom</span>
-        <span className="spacer" />
-        <button className="icon-btn" title="Hide sidebar" onClick={onToggle}>
-          <IconPanel />
-        </button>
+      <div className="side-search">
+        <IconSearch />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search"
+          spellCheck={false}
+          aria-label="Search chats"
+        />
+        {qActive && (
+          <button className="icon-btn side-search-x" title="Clear search" onClick={() => setQuery("")}>
+            <IconClose />
+          </button>
+        )}
       </div>
 
       <div className="side-nav">
-        <button onClick={onNewTask}>
+        <button onClick={onNewTask} title="New task">
           <IconPlus />
-          New task
+          New
         </button>
         <button onClick={onPick}>
           <IconFolder />
@@ -253,22 +258,6 @@ export function Sidebar({
         )}
       </div>
 
-      <div className="side-search">
-        <IconSearch />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search chats"
-          spellCheck={false}
-          aria-label="Search chats"
-        />
-        {qActive && (
-          <button className="icon-btn side-search-x" title="Clear search" onClick={() => setQuery("")}>
-            <IconClose />
-          </button>
-        )}
-      </div>
-
       <div className="side-scroll">
         {visibleGroups.map((g) => {
           const current = normEq(g.path, folder);
@@ -373,7 +362,9 @@ export function Sidebar({
                     );
                   })}
 
-                  {g.sessions.length === 0 && current && (
+                  {/* Only while searching: with no query an empty project just
+                      has no chats yet, and "No chats match." read as an error. */}
+                  {g.sessions.length === 0 && current && qActive && (
                     <div className="sess-empty">No chats match.</div>
                   )}
                 </div>
@@ -382,7 +373,7 @@ export function Sidebar({
           );
         })}
 
-        {(qActive || visibleGroups.length === 0) && (
+        {qActive && !visibleGroups.some((g) => g.sessions.length > 0) && (
           <div className="no-hits">Nothing found for “{query.trim()}”.</div>
         )}
 
@@ -390,31 +381,55 @@ export function Sidebar({
 
       <div className="side-foot">
         <div className="side-foot-row">
-          <button
-            className="clear-all"
-            onClick={() => {
-              // A click-again toggle used to guard this, armed for four
-              // seconds. Read the label, think about it, click a moment too
-              // late and that click merely re-armed it - so a careful user
-              // could press it all day and never delete anything. A dialog
-              // has no clock, and says what is about to be destroyed.
-              const total =
-                groups.reduce((n, g) => n + g.sessions.length, 0) + archived.length;
-              if (total === 0) return;
-              const ok = window.confirm(
-                `Delete all ${total} stored session${total === 1 ? "" : "s"}, ` +
-                  `across every project?
-
-This cannot be undone. Your API keys ` +
-                  `and settings are not affected.`,
-              );
-              if (ok) onClearAll();
-            }}
-            title="Delete every stored session, for all projects"
-          >
-            <IconTrash />
-            Clear all sessions
-          </button>
+          <div className="foot-who-wrap">
+            <button
+              className="foot-who"
+              onClick={() => setMenuFor(menuFor === "foot" ? null : "foot")}
+              aria-expanded={menuFor === "foot"}
+              title="Loom menu"
+            >
+              <span className="foot-avatar" aria-hidden>
+                L
+              </span>
+              <span className="foot-name">Loom</span>
+              <span className="foot-plan">· Local</span>
+              <IconChevron className={`foot-chev ${menuFor === "foot" ? "up" : ""}`} />
+            </button>
+            {menuFor === "foot" && (
+              <div className="menu menu-up">
+                <button
+                  onClick={() => {
+                    setMenuFor(null);
+                    onOpenSettings();
+                  }}
+                >
+                  <IconGear className="menu-ico" />
+                  Providers &amp; API keys
+                </button>
+                <button
+                  className="menu-danger"
+                  onClick={() => {
+                    setMenuFor(null);
+                    // A dialog, not a click-again toggle: a timed arm could be
+                    // pressed all day a moment too late and never fire. It
+                    // also says what is about to be destroyed.
+                    const total =
+                      groups.reduce((n, g) => n + g.sessions.length, 0) + archived.length;
+                    if (total === 0) return;
+                    const ok = window.confirm(
+                      `Delete all ${total} stored session${total === 1 ? "" : "s"}, ` +
+                        `across every project?\n\nThis cannot be undone. Your API keys ` +
+                        `and settings are not affected.`,
+                    );
+                    if (ok) onClearAll();
+                  }}
+                >
+                  <IconTrash className="menu-ico" />
+                  Clear all sessions
+                </button>
+              </div>
+            )}
+          </div>
           <button
             className="foot-gear"
             onClick={onOpenSettings}

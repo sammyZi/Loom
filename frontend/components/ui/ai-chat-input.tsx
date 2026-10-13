@@ -493,9 +493,17 @@ function ModelPicker({
 
   useEffect(() => {
     if (!open) return;
-    listRef.current
-      ?.querySelector('[data-cursor="1"]')
-      ?.scrollIntoView({ block: "nearest" });
+    // By hand, not scrollIntoView: the provider header is sticky, and
+    // "nearest" parked the cursor row underneath it, half hidden. Layout
+    // offsets, not rects: the panel animates in with a scale transform.
+    const list = listRef.current;
+    const row = list?.querySelector<HTMLElement>('[data-cursor="1"]');
+    if (!list || !row) return;
+    const head = list.querySelector<HTMLElement>(".picker-group-head")?.offsetHeight ?? 0;
+    const top = row.offsetTop - head;
+    const bottom = row.offsetTop + row.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
   }, [cursor, open, query]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -538,7 +546,7 @@ function ModelPicker({
         style={{ transformOrigin: "bottom left" }}
         onKeyDown={onKeyDown}
         className={cn(
-          "absolute bottom-full left-0 mb-2 z-50 w-80 rounded-xl border border-border bg-card/95 p-1 shadow-xl backdrop-blur-md flex flex-col transition-all duration-300 cursor-default",
+          "absolute bottom-full left-0 mb-2 z-50 w-[22rem] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-card/95 p-1 shadow-xl backdrop-blur-md flex flex-col transition-all duration-300 cursor-default",
           open
             ? "opacity-100 scale-100 translate-y-0 pointer-events-auto ease-[cubic-bezier(0.34,1.56,0.64,1)]"
             : "opacity-0 scale-95 translate-y-3 pointer-events-none"
@@ -561,7 +569,7 @@ function ModelPicker({
 
         <div
           ref={listRef}
-          className="model-picker-scroll prompt-scrollbar flex flex-col gap-0.5 max-h-72 overflow-y-auto pr-0.5"
+          className="model-picker-scroll prompt-scrollbar relative flex flex-col gap-0.5 max-h-80 overflow-y-auto pr-0.5"
         >
           {hits.map(({ g, m, ready }, i) => {
             const selected = m.id === value;
@@ -615,21 +623,25 @@ function ModelPicker({
                       : `${m.id}\n${m.hint ? `${m.hint} · ` : ""}${Math.round(m.context / 1000)}k context`
                   }
                   className={cn(
-                    "group relative flex h-7 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-medium outline-none transition-colors cursor-default",
+                    "group relative flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-xs font-medium outline-none transition-colors cursor-default",
                     atCursor && "bg-accent",
                     selected ? "text-foreground" : "text-foreground/70",
                     !ready && "opacity-45"
                   )}
                 >
                   <ModelIcon model={m.id} className="size-3.5 opacity-85 shrink-0" />
-                  <RollingText text={m.label} active={atCursor} className="min-w-0 flex-1" />
-                  {/* Gateways carry near-duplicate names, so the real id is the
-                      only way to tell two rows apart. */}
-                  <RollingText
-                    text={m.id.slice(g.id.length + 1)}
-                    active={atCursor}
-                    className="picker-id"
-                  />
+                  {/* Name over id, each with the full row width. Side by side
+                      they split one line and both came out truncated past
+                      reading ("NVIDIA: |", "Cohere: No"). Gateways carry
+                      near-duplicate names, so the id is what tells rows apart. */}
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <RollingText text={m.label} active={atCursor} className="min-w-0" />
+                    <RollingText
+                      text={m.id.slice(g.id.length + 1)}
+                      active={atCursor}
+                      className="picker-id"
+                    />
+                  </span>
                   {/* Kept mounted so the row width does not jump on select. */}
                   <Check
                     className={cn(
@@ -807,8 +819,8 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     const demoTextIntervalRef = useRef<number | null>(null);
 
     const [hoverStyle, setHoverStyle] = useState({ opacity: 0, transform: "translateY(0px) scale(0.95)", transition: "none" });
-    const [containerHeight, setContainerHeight] = useState(116);
-    const [textareaHeight, setTextareaHeight] = useState(68);
+    const [containerHeight, setContainerHeight] = useState(52);
+    const [textareaHeight, setTextareaHeight] = useState(52);
     const [isScrolling, setIsScrolling] = useState(false);
 
     const isControlled = controlledValue !== undefined;
@@ -846,11 +858,6 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       if (!isControlled) setLocalValue(val);
       onChange?.(val);
     }, [isControlled, onChange]);
-
-    const expand = () => {
-      setIsSmoothResize(false);
-      setExpanded(true);
-    };
 
     // --- Voice Recording Logic ---
     const stopRecording = useCallback(() => {
@@ -1027,18 +1034,18 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       void el.offsetHeight;
       el.style.transition = '';
 
-      const newHeight = Math.max(68, Math.min(scrollHeight, 160));
+      const newHeight = Math.max(52, Math.min(scrollHeight, 200));
       el.style.height = `${newHeight}px`;
 
       setTextareaHeight(newHeight);
-      setIsScrolling(scrollHeight > 160);
+      setIsScrolling(scrollHeight > 200);
 
       setTimeout(updateFades, 0);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [value, expanded]);
 
     useEffect(() => {
-      setContainerHeight(Math.max(124, textareaHeight + 56));
+      setContainerHeight(textareaHeight);
       setTimeout(updateFades, 0);
     }, [textareaHeight]);
 
@@ -1168,11 +1175,10 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             internalContainerRef.current = node;
           }}
           onBlur={handleBlur}
+          // Full column width in both states, Claude Code style: the prompt
+          // shares its edges with the transcript and the repo bar above it.
+          // Only the height animates on focus now.
           className={cn("relative flex flex-col w-full", className)}
-          style={{
-            maxWidth: expanded ? 680 : 520,
-            transition: isSmoothResize ? "max-width 0.15s ease-out" : "max-width 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)",
-          }}
         >
           <input
             ref={fileInputRef}
@@ -1245,8 +1251,8 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
               textareaRef.current?.focus();
             }}
             style={{
-              borderRadius: 24,
-              height: expanded ? containerHeight : 52,
+              borderRadius: 10,
+              height: containerHeight,
               transition: isSmoothResize ? SMOOTH_HEIGHT_TRANSITION : SPRING_TRANSITION,
               overflow: expanded ? "visible" : "hidden",
             }}
@@ -1279,17 +1285,21 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   setOpenPicker(null);
                 }
               }}
+              // Always the real field. A fake placeholder button used to sit
+              // here until the first click, then cross-fade into this one; with
+              // both one line tall in the same spot, that read as a flicker.
+              onFocus={() => {
+                if (!expanded) {
+                  setIsSmoothResize(true);
+                  setExpanded(true);
+                }
+              }}
               placeholder={placeholder}
               aria-label="Prompt"
               disabled={isRecording}
-              style={{
-                transition: isSmoothResize
-                  ? "height 0.15s ease-out"
-                  : "opacity 0.3s ease-out, transform 0.3s ease-out, height 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)"
-              }}
+              style={{ transition: "height 0.15s ease-out" }}
               className={cn(
-                "prompt-scrollbar absolute top-0 inset-x-0 z-[1] w-full resize-none bg-transparent pl-5 pr-14 py-4 text-[15px] leading-[24px] text-foreground outline-none placeholder:font-medium placeholder:text-muted-foreground cursor-text",
-                expanded ? "opacity-100 scale-100 translate-y-0" : "opacity-0 scale-95 -translate-y-1 pointer-events-none",
+                "prompt-scrollbar absolute top-0 inset-x-0 z-[1] w-full resize-none bg-transparent pl-4 pr-14 py-[14px] text-[15px] leading-[24px] text-foreground outline-none placeholder:font-normal placeholder:text-muted-foreground cursor-text",
                 isScrolling ? "overflow-y-auto" : "overflow-y-hidden",
                 isRecording && "pointer-events-none"
               )}
@@ -1308,74 +1318,6 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                 transition: isSmoothResize ? "top 0.15s ease-out" : "top 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)"
               }}
             />
-
-            <button
-              type="button"
-              onClick={expand}
-              style={{ transition: isSmoothResize ? "none" : "all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)" }}
-              className={cn(
-                "absolute inset-x-0 top-0 z-[1] cursor-text truncate pl-5 pr-14 py-[16px] text-left text-[15px] font-medium leading-[20px] text-muted-foreground outline-none",
-                !expanded ? "opacity-100 scale-100 translate-y-0" : "opacity-0 scale-105 translate-y-1 pointer-events-none"
-              )}
-              aria-label="Open prompt input"
-            >
-              {placeholder}
-            </button>
-
-            {/* Bottom Actions Wrapper - Hides when recording to make space for visualizer */}
-            <div
-              className={cn(
-                "absolute bottom-2.5 left-4 right-14 z-[10] flex items-center gap-2 transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]",
-                expanded && !isRecording ? "opacity-100 blur-0 translate-y-0 pointer-events-auto" : "opacity-0 blur-sm translate-y-2 pointer-events-none"
-              )}
-            >
-              <ModelPicker
-                open={openPicker === "model"}
-                onOpen={() => setOpenPicker(openPicker === "model" ? null : "model")}
-                onPick={(v) => {
-                  setSelectedModel(v);
-                  setOpenPicker(null);
-                }}
-                onOpenSettings={onOpenSettings}
-                groups={groups}
-                value={selectedModel}
-              />
-
-              {/* Context usage lives in the ContextBar above the composer now:
-                  it is status, not an input control. */}
-              <Picker
-                open={openPicker === "mode"}
-                onOpen={() => setOpenPicker(openPicker === "mode" ? null : "mode")}
-                onPick={(v) => {
-                  setSelectedMode(v);
-                  setOpenPicker(null);
-                }}
-                value={selectedMode}
-                options={modes}
-                renderIcon={(v, c) => <ModeIcon mode={v} className={c} />}
-                label="mode"
-              />
-
-              <Picker
-                open={openPicker === "effort"}
-                onOpen={() => setOpenPicker(openPicker === "effort" ? null : "effort")}
-                onPick={(v) => {
-                  setEffortIndex(Math.max(0, efforts.indexOf(v)));
-                  setOpenPicker(null);
-                }}
-                value={efforts[effortIndex]}
-                options={efforts}
-                renderIcon={(v) => <DynamicBarsIcon level={v} />}
-                label="reasoning effort"
-              />
-
-              <button
-                type="button" onMouseDown={(e) => e.preventDefault()} onClick={openFileChooser} disabled={attachments.length >= maxAttachments}
-                className="ml-auto flex size-7 items-center justify-center rounded-full text-foreground/50 transition-all duration-200 hover:bg-accent/60 hover:text-foreground outline-none cursor-default disabled:opacity-40 disabled:pointer-events-none"
-              >
-                <PlusIcon />
-              </button>
-            </div>
 
             {/* Audio Wave Visualizer Overlay positioned precisely to the left of the mic button */}
             <div
@@ -1399,7 +1341,14 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
               onClick={onActionButtonClick}
               aria-label={showArrow ? "Send prompt" : showStop ? "Stop" : "Use voice input"}
               style={{ borderRadius: 9999 }}
-              className="absolute right-2.5 bottom-2.5 z-[10] flex h-8 w-8 items-center justify-center bg-primary text-primary-foreground transition-all duration-300 hover:opacity-90 outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-default"
+              className={cn(
+                "absolute right-2.5 bottom-2.5 z-[10] flex h-8 w-8 items-center justify-center transition-all duration-300 outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-default",
+                // A plain icon at rest (the mic), filled only when there is
+                // something to send or stop, as in Claude Code.
+                showMic && !isRecording
+                  ? "bg-transparent text-foreground/60 hover:bg-accent hover:text-foreground"
+                  : "bg-primary text-primary-foreground hover:opacity-90"
+              )}
             >
               <span className="relative flex h-full w-full items-center justify-center">
                 <span className={cn("absolute inset-0 flex items-center justify-center transition-all duration-300 ease-[cubic-bezier(0.175,0.885,0.32,1.275)]", showArrow ? "opacity-100 scale-100 rotate-0 blur-none" : "opacity-0 scale-50 rotate-45 blur-[1px] pointer-events-none")}>
@@ -1413,6 +1362,58 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                 </span>
               </span>
             </button>
+          </div>
+
+          {/* Controls under the card, Claude Code style: attach and mode on
+              the left, model and effort on the right. They used to sit
+              inside the card and only appear once it expanded. */}
+          <div className="composer-controls">
+              <button
+                type="button" onMouseDown={(e) => e.preventDefault()} onClick={openFileChooser} disabled={attachments.length >= maxAttachments}
+                title="Attach images" aria-label="Attach images"
+                className="composer-icon-btn"
+              >
+                <PlusIcon />
+              </button>
+              <Picker
+                open={openPicker === "mode"}
+                onOpen={() => setOpenPicker(openPicker === "mode" ? null : "mode")}
+                onPick={(v) => {
+                  setSelectedMode(v);
+                  setOpenPicker(null);
+                }}
+                value={selectedMode}
+                options={modes}
+                renderIcon={(v, c) => <ModeIcon mode={v} className={c} />}
+                label="mode"
+              />
+
+              <span className="flex-1" />
+              <ModelPicker
+                open={openPicker === "model"}
+                onOpen={() => setOpenPicker(openPicker === "model" ? null : "model")}
+                onPick={(v) => {
+                  setSelectedModel(v);
+                  setOpenPicker(null);
+                }}
+                onOpenSettings={onOpenSettings}
+                groups={groups}
+                value={selectedModel}
+              />
+
+              <Picker
+                open={openPicker === "effort"}
+                onOpen={() => setOpenPicker(openPicker === "effort" ? null : "effort")}
+                onPick={(v) => {
+                  setEffortIndex(Math.max(0, efforts.indexOf(v)));
+                  setOpenPicker(null);
+                }}
+                value={efforts[effortIndex]}
+                options={efforts}
+                renderIcon={(v) => <DynamicBarsIcon level={v} />}
+                label="reasoning effort"
+              />
+
           </div>
         </div>
 

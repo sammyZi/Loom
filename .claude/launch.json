@@ -3,6 +3,12 @@
   "autoPort": false,
   "configurations": [
     {
+      "name": "app",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "cli"],
+      "port": 8080
+    },
+    {
       "name": "frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": [

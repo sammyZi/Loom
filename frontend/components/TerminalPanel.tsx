@@ -76,11 +76,77 @@ export function splitLog(log: string, cwd: string): LogRun[] {
   return runs;
 }
 
+/** One styled stretch of output: `fg` is the SGR colour code (30–37, 90–97). */
+export type AnsiSpan = { text: string; fg?: number; bold?: boolean };
+
+/** CSI (colours, cursor moves), OSC (titles, links) and charset escapes. */
+const ANSI = /\x1b\[([0-9;?]*)([A-Za-z])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]/g;
+
+/**
+ * Colour codes become spans; every other escape is dropped. Output used to
+ * show raw `[32m` noise wherever a tool forced colour through the pipe.
+ */
+export function parseAnsi(s: string): AnsiSpan[] {
+  const out: AnsiSpan[] = [];
+  let fg: number | undefined;
+  let bold = false;
+  let last = 0;
+  const push = (text: string) => {
+    if (!text) return;
+    const prev = out[out.length - 1];
+    if (prev && prev.fg === fg && !!prev.bold === bold) prev.text += text;
+    else out.push({ text, fg, bold });
+  };
+  for (const m of s.matchAll(ANSI)) {
+    push(s.slice(last, m.index));
+    last = (m.index ?? 0) + m[0].length;
+    if (m[2] !== "m") continue;
+    const codes = (m[1] || "0").split(";").map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0) {
+        fg = undefined;
+        bold = false;
+      } else if (c === 1) bold = true;
+      else if (c === 22) bold = false;
+      else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) fg = c;
+      else if (c === 39) fg = undefined;
+      // 256-colour and truecolour carry their own arguments; skip them.
+      else if (c === 38 || c === 48) i += codes[i + 1] === 5 ? 2 : codes[i + 1] === 2 ? 4 : 0;
+    }
+  }
+  push(s.slice(last));
+  return out;
+}
+
+/** A lone `\r` rewinds the line — progress bars redraw in place — so only
+ *  what was written after the last one on each line is still on screen. */
+export function applyCarriageReturns(s: string): string {
+  return s.replace(/\r\n/g, "\n").replace(/[^\n]*\r(?=[^\n])/g, "");
+}
+
+function Ansi({ text }: { text: string }) {
+  const spans = parseAnsi(text);
+  return (
+    <>
+      {spans.map((sp, i) =>
+        sp.fg === undefined && !sp.bold ? (
+          sp.text
+        ) : (
+          <span key={i} className={`${sp.fg ? `ansi-${sp.fg}` : ""}${sp.bold ? " ansi-b" : ""}`}>
+            {sp.text}
+          </span>
+        ),
+      )}
+    </>
+  );
+}
+
 /** Log body shared by the agent section and the interactive terminals. */
 function LogView({ log, cwd }: { log: string; cwd: string }) {
   return (
     <pre className="term-out">
-      {splitLog(log, cwd).map((run, i) =>
+      {splitLog(applyCarriageReturns(log), cwd).map((run, i) =>
         run.kind === "prompt" ? (
           <span key={i}>
             <span className="term-ps">{cwd}&gt;</span>
@@ -91,11 +157,23 @@ function LogView({ log, cwd }: { log: string; cwd: string }) {
             {run.text}
           </span>
         ) : (
-          run.text
+          <Ansi key={i} text={run.text} />
         ),
       )}
     </pre>
   );
+}
+
+const HISTORY_KEY = "loom.term.history";
+const HISTORY_CAP = 200;
+
+function loadHistory(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Tab id for the read-only agent section; real terminals start at 1. */
@@ -141,6 +219,15 @@ export function TerminalPanel({
   // Autoscroll only while the user is already at the bottom; yanking the view
   // down on every chunk made reading scrollback mid-run impossible.
   const stick = useRef(true);
+  // Shell-style history, shared by every tab and kept across reloads.
+  // `histPos` is where Up/Down is in it; history.length means "the draft".
+  const history = useRef<string[]>([]);
+  const histPos = useRef(0);
+  const draft = useRef("");
+  useEffect(() => {
+    history.current = loadHistory();
+    histPos.current = history.current.length;
+  }, []);
 
   const onAgent = active === AGENT_ID;
   const current = terms.find((t) => t.id === active) || terms[0];
@@ -256,10 +343,44 @@ export function TerminalPanel({
     }
   }
 
+  /** The job Stop, Ctrl+C and stdin act on: the tab on screen when it is
+   *  running, else the last command started here. Using only the latter made
+   *  Stop a no-op on the agent's dev-server tabs, which this panel never
+   *  started itself. */
+  function targetJob(): string | null {
+    return current?.running ? current.job : runningJob.current;
+  }
+
+  function remember(line: string) {
+    const h = history.current.filter((x) => x !== line);
+    h.push(line);
+    history.current = h.slice(-HISTORY_CAP);
+    histPos.current = history.current.length;
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history.current));
+    } catch {
+      /* storage blocked; history just lasts this session */
+    }
+  }
+
+  /** Up/Down through history, keeping whatever was half-typed as the bottom. */
+  function browseHistory(step: -1 | 1) {
+    const h = history.current;
+    if (histPos.current === h.length) draft.current = cmd;
+    const pos = Math.max(0, Math.min(h.length, histPos.current + step));
+    histPos.current = pos;
+    setCmd(pos === h.length ? draft.current : h[pos]);
+  }
+
+  function clearTab() {
+    const id = current?.id;
+    if (id !== undefined) setTerms((prev) => prev.map((t) => (t.id === id ? { ...t, log: "" } : t)));
+  }
+
   /** Answer a prompting command. Echoes locally, because the child's own echo
    *  is off on a pipe — without this you cannot see what you typed. */
   function sendStdin(text: string) {
-    const job = runningJob.current;
+    const job = targetJob();
     if (!job) return;
     const tab = terms.find((t) => t.job === job);
     api.shellInput(job, `${text}\r\n`).catch(() => {});
@@ -269,7 +390,7 @@ export function TerminalPanel({
 
   /** Ctrl+C / the stop button: kill the running command, like a real terminal. */
   function interrupt() {
-    const job = runningJob.current;
+    const job = targetJob();
     if (!job) return;
     interrupted.current.add(job);
     api.cancelShell(job).catch(() => {});
@@ -301,6 +422,13 @@ export function TerminalPanel({
 
   async function run() {
     const line = cmd.trim();
+    if (line) remember(line);
+    // Handled here: a pipe has no screen for `cls` to clear.
+    if (/^(clear|cls)$/i.test(line)) {
+      setCmd("");
+      clearTab();
+      return;
+    }
     const started = beginRun(line);
     if (!started) return;
     const tab = started.tab;
@@ -333,6 +461,7 @@ export function TerminalPanel({
    *  output keeps streaming into this tab until it exits or is stopped. */
   async function runBg() {
     const line = cmd.trim();
+    if (line) remember(line);
     const started = beginRun(line, "[keep running]");
     if (!started) return;
     try {
@@ -438,11 +567,18 @@ export function TerminalPanel({
                     // No mode toggle cluttering the prompt: Shift+Enter is the
                     // detached run, for dev servers that must outlive the call.
                     if (e.key === "Enter") (e.shiftKey ? runBg : run)();
+                    else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                      e.preventDefault();
+                      browseHistory(e.key === "ArrowUp" ? -1 : 1);
+                    } else if (e.key === "l" && e.ctrlKey) {
+                      e.preventDefault();
+                      clearTab();
+                    }
                   }}
                   spellCheck={false}
                   autoComplete="off"
                   aria-label="Terminal command"
-                  title="Enter runs and waits · Shift+Enter keeps it running (dev servers)"
+                  title="Enter runs · Shift+Enter keeps it running (dev servers) · ↑/↓ history · Ctrl+L clears"
                 />
               </div>
             ) : (

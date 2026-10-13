@@ -2,8 +2,8 @@
 
 import { IconMark, IconUndo } from "@/components/Icons";
 import { CopyButton, Markdown, SpeakButton } from "@/components/Markdown";
-import type { TodoItem } from "@/lib/api";
-import { groupLog, secs, type LogItem } from "@/lib/log";
+import type { SubagentInfo, TodoItem } from "@/lib/api";
+import { groupLog, secs, summarizeTools, type LogItem } from "@/lib/log";
 import { useEffect, useRef, useState } from "react";
 
 export function Feed({
@@ -14,6 +14,7 @@ export function Feed({
   elapsed,
   tokens,
   todos = [],
+  agents = [],
   pending,
   onDecide,
   onRevert,
@@ -27,6 +28,8 @@ export function Feed({
   tokens: number;
   /** The agent's task list for a multi-step job. */
   todos?: TodoItem[];
+  /** Background subagents this run started. */
+  agents?: SubagentInfo[];
   /** Open approval request (manual mode): the agent wants to run a command. */
   pending?: { id: string; program: string; args: string } | null;
   onDecide?: (allow: boolean) => void;
@@ -136,6 +139,7 @@ export function Feed({
         {/* The plan, above the status line: on a long job this is the only
             thing that says how much is left. */}
         {todos.length > 0 && <TodoList todos={todos} />}
+        {agents.length > 0 && <AgentList agents={agents} />}
 
         {busy && !pending && (
           // Expandable in place: "still thinking…" is where the eye already is
@@ -186,6 +190,36 @@ function TodoList({ todos }: { todos: TodoItem[] }) {
           <li key={i} className={`todo ${t.status}`}>
             <span className="todo-mark" aria-hidden />
             <span className="todo-text">{t.text}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** Subagents running in parallel. Same card as the plan: it answers the
+ *  same question — how much is still going on. */
+function AgentList({ agents }: { agents: SubagentInfo[] }) {
+  const live = agents.filter((a) => a.status === "running").length;
+  return (
+    <div className={`todos agents ${live === 0 ? "all-done" : ""}`}>
+      <div className="todos-head">
+        <span className="todos-title">Agents</span>
+        <span className="todos-count">{live > 0 ? `${live} running` : `${agents.length} finished`}</span>
+      </div>
+      <ol className="todos-list">
+        {agents.map((a) => (
+          <li
+            key={a.id}
+            className={`todo ${a.status === "running" ? "running" : a.status === "done" ? "done" : "pending"}`}
+            title={a.summary}
+          >
+            <span className="todo-mark" aria-hidden />
+            <span className="todo-text">
+              <b>{a.id}</b>
+              {a.status === "failed" ? " · failed" : a.status === "closed" ? " · stopped" : ""}
+              {a.summary ? ` — ${a.summary}` : ""}
+            </span>
           </li>
         ))}
       </ol>
@@ -360,6 +394,8 @@ function UndoButton({
 
 function ToolLine({ items, running }: { items: LogItem[]; running: boolean }) {
   const latest = items[items.length - 1];
+  const add = items.reduce((n, t) => n + (t.add ?? 0), 0);
+  const del = items.reduce((n, t) => n + (t.del ?? 0), 0);
   return (
     <details className="work-group">
       <summary>
@@ -372,7 +408,13 @@ function ToolLine({ items, running }: { items: LogItem[]; running: boolean }) {
             </span>
           </>
         ) : (
-          `Ran ${items.length} command${items.length === 1 ? "" : "s"}`
+          <span>{summarizeTools(items)}</span>
+        )}
+        {(add > 0 || del > 0) && (
+          <span className="diff-chip">
+            <span className="add">+{add}</span>
+            <span className="del">−{del}</span>
+          </span>
         )}
       </summary>
       <div className="work-items">

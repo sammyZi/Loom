@@ -15,6 +15,7 @@ import {
   Link2,
   Maximize2,
   MoreHorizontal,
+  MoreVertical,
   PanelLeft,
   Paperclip,
   Play,
@@ -26,6 +27,7 @@ import {
   SlidersHorizontal,
   Square,
   SquareTerminal,
+  Terminal,
   Trash2,
   Undo2,
   Volume2,
@@ -39,7 +41,7 @@ import {
 export const IconPanel = (p: LucideProps) => <PanelLeft {...p} />;
 export const IconPlus = (p: LucideProps) => <Plus {...p} />;
 export const IconFolder = (p: LucideProps) => <Folder {...p} />;
-export const IconTerminal = (p: LucideProps) => <SquareTerminal {...p} />;
+export const IconTerminal = (p: LucideProps) => <Terminal {...p} />;
 export const IconLink = (p: LucideProps) => <Link2 {...p} />;
 export const IconCheck = (p: LucideProps) => <Check {...p} />;
 export const IconClose = (p: LucideProps) => <X {...p} />;
@@ -55,6 +57,7 @@ export const IconChevron = (p: LucideProps) => <ChevronRight {...p} />;
 export const IconCopy = (p: LucideProps) => <Copy {...p} />;
 export const IconBack = (p: LucideProps) => <ArrowLeft {...p} />;
 export const IconDots = (p: LucideProps) => <MoreHorizontal {...p} />;
+export const IconKebab = (p: LucideProps) => <MoreVertical {...p} />;
 export const IconSliders = (p: LucideProps) => <SlidersHorizontal {...p} />;
 export const IconPlay = (p: LucideProps) => <Play {...p} />;
 export const IconStop = (p: LucideProps) => <Square {...p} />;

@@ -8,10 +8,12 @@ export type SubmitMeta = { model: string; mode: string; effort: string; attachme
 /**
  * Run modes, surfaced as their own dropdown in the composer.
  * These strings are parsed by orchestrator::Mode::parse on the backend.
- *   Auto    planner -> coder -> reviewer, agent may run commands
- *   Plan    planner only, nothing is edited
- *   Manual  one agent, one pass, no planner or reviewer
- *   Approve agent has no shell; it lists commands for you to run
+ * All four run the same single agent loop (Codex-style) with different
+ * permissions:
+ *   Auto    full tools, no prompts; build/tests checked after edits
+ *   Plan    read-only, proposes a plan, nothing is edited
+ *   Manual  full tools, every shell command asks first
+ *   Approve edits allowed, no shell; it lists commands for you to run
  */
 export const MODES = ["Auto", "Plan", "Manual", "Approve"];
 

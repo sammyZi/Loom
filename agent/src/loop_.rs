@@ -33,6 +33,31 @@ pub struct RunEnv {
     pub before: Arc<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>>,
 }
 
+/// Tools that only read, so one turn's calls to them can run concurrently —
+/// Codex's parallel tool calls. Delegation is here too: several `task` calls
+/// in one turn are how the model fans out to subagents.
+const PARALLEL_SAFE: &[&str] = &[
+    "read_file", "list_files", "search_files", "web_search", "web_fetch", "skill", "task",
+    "spawn_agent", "wait_agent",
+];
+
+/// Cancels a conversation's unfinished background subagents on every exit
+/// path, including errors and Stop.
+struct CloseAgents(crate::tools::AgentPool);
+impl Drop for CloseAgents {
+    fn drop(&mut self) {
+        self.0.close_all();
+    }
+}
+
+/// One conversation: stream → run tool calls → repeat until the model answers
+/// without calling a tool. Returns that answer and the full transcript, so a
+/// caller can continue the same conversation (the orchestrator feeds failing
+/// checks back this way instead of starting a fresh agent from nothing).
+///
+/// Never sends `Done` — the run has exactly one, from whoever owns the run.
+/// `speaks` decides whether text streams to the user as the answer or is
+/// shown as reasoning.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent(
     role: AgentRole,
@@ -40,17 +65,16 @@ pub async fn run_agent(
     model: String,
     effort: String,
     tools: ToolRegistry,
-    announce_done: bool,
+    speaks: bool,
     // Tool-call turns before this role gives up and hands back whatever it
-    // has. Was a hardcoded 24 for every role; callers now size it to the job
-    // (a coder doing real work needs far more than a read-only reviewer).
+    // has. Callers size it to the job.
     max_turns: u32,
     env: &RunEnv,
     seed: Vec<Message>,
     perm: Option<PermGate>,
     perms: ide_core::PermissionSet,
     spawn_subagent: Option<crate::tools::SubagentRunner>,
-) -> Result<String> {
+) -> Result<(String, Vec<Message>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
@@ -80,7 +104,9 @@ pub async fn run_agent(
         writes: env.writes.clone(),
         read_budget: env.read_budget.clone(),
         before: env.before.clone(),
+        agents: Default::default(),
     };
+    let _close = CloseAgents(ctx.agents.clone());
     let mut messages = seed;
     messages.push(Message::user_text(prompt));
     let system = format!("{}{skill_text}", system_prompt(role, &ctx.ws));
@@ -89,6 +115,9 @@ pub async fn run_agent(
     // input-token report beats any local character estimate. Shared because
     // the streaming callback owns its captures.
     let measured_input = Arc::new(std::sync::Mutex::new(None::<u64>));
+    // OpenHands' stuck detector, the core case: the same call returning the
+    // same result again and again. Warn at the third, stop at the fifth.
+    let mut loop_guard = LoopGuard::default();
 
     for _ in 0..max_turns {
         if env.cancel.is_cancelled() {
@@ -141,7 +170,7 @@ pub async fn run_agent(
                     // planner or reviewer streaming as answer text is why an
                     // internal plan ("Implementation plan: 1. Scaffold…") was
                     // being narrated at the user as if it were the reply.
-                    let _ = ev_tx.send(if announce_done {
+                    let _ = ev_tx.send(if speaks {
                         AgentEvent::Token { text: t }
                     } else {
                         AgentEvent::Think { text: t }
@@ -159,10 +188,15 @@ pub async fn run_agent(
 
         last_text = turn.text.clone();
         if turn.tools.is_empty() {
-            if announce_done {
-                let _ = env.events.send(AgentEvent::Done { summary: last_text.clone() });
+            if !last_text.is_empty() {
+                messages.push(Message {
+                    role: "assistant".into(),
+                    content: Some(json!(last_text)),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
             }
-            return Ok(last_text);
+            return Ok((last_text, messages));
         }
 
         let tool_calls: Vec<_> = turn
@@ -190,24 +224,66 @@ pub async fn run_agent(
             tool_call_id: None,
         });
 
-        for t in turn.tools {
-            if env.cancel.is_cancelled() {
-                anyhow::bail!("cancelled");
+        if env.cancel.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        // One gate for every tool, checked against the call's own subject, so
+        // `git status` can be free while `git push` is refused.
+        let exec = |t: &provider::ToolUse| {
+            let ctx = &ctx;
+            let tools = &tools;
+            let cancel = &env.cancel;
+            let (name, input) = (t.name.clone(), t.input.clone());
+            async move {
+                let subject = crate::tools::call_subject(&name, &input);
+                Ok::<String, anyhow::Error>(match ctx.gate(&name, &subject, cancel).await? {
+                    Some(refusal) => refusal,
+                    None => match tools.get(&name) {
+                        Some(tool) => tool
+                            .call(ctx, input, cancel)
+                            .await
+                            .unwrap_or_else(|e| e.to_string()),
+                        None => format!("unknown tool {name}"),
+                    },
+                })
             }
-            // One gate for every tool, checked against the call's own subject,
-            // so `git status` can be free while `git push` is refused. Gating
-            // inside individual tools only ever covered run_command.
-            let subject = crate::tools::call_subject(&t.name, &t.input);
-            let output = match ctx.gate(&t.name, &subject, &env.cancel).await? {
-                Some(refusal) => refusal,
-                None => match tools.get(&t.name) {
-                    Some(tool) => tool
-                        .call(&ctx, t.input, &env.cancel)
-                        .await
-                        .unwrap_or_else(|e| e.to_string()),
-                    None => format!("unknown tool {}", t.name),
-                },
-            };
+        };
+        // Run the turn's calls concurrently only when every one is read-only
+        // and needs no approval: two approval prompts at once would leave one
+        // unanswerable, and a write must never race a read of the same file.
+        let parallel = turn.tools.len() > 1
+            && turn.tools.iter().all(|t| {
+                PARALLEL_SAFE.contains(&t.name.as_str())
+                    && ctx.perms.decide(&t.name, &crate::tools::call_subject(&t.name, &t.input))
+                        == ide_core::Permission::Allow
+            });
+        let outputs: Vec<String> = if parallel {
+            futures_util::future::join_all(turn.tools.iter().map(exec))
+                .await
+                .into_iter()
+                .collect::<Result<_>>()?
+        } else {
+            let mut out = Vec::with_capacity(turn.tools.len());
+            for t in &turn.tools {
+                if env.cancel.is_cancelled() {
+                    anyhow::bail!("cancelled");
+                }
+                out.push(exec(t).await?);
+            }
+            out
+        };
+        let mut stuck = false;
+        for (t, mut output) in turn.tools.into_iter().zip(outputs) {
+            match loop_guard.see(&t.name, &t.input, &output) {
+                LoopVerdict::Fine => {}
+                LoopVerdict::Warn(n) => output.push_str(&format!(
+                    "\n\n[loop guard] This is the {n}th identical `{}` call in a row with the \
+                     same result. Repeating it will not change anything — try a different \
+                     approach, or reply with what is blocking you.",
+                    t.name
+                )),
+                LoopVerdict::Stop => stuck = true,
+            }
             let _ = env.events.send(AgentEvent::ToolResult {
                 name: t.name.clone(),
                 output: output.clone(),
@@ -218,6 +294,14 @@ pub async fn run_agent(
                 tool_calls: None,
                 tool_call_id: Some(t.id),
             });
+        }
+        if stuck {
+            let note = format!(
+                "{}Stopped: I kept repeating the same step with the same result, so I ended the \
+                 run rather than burn more turns on it. Tell me what to try differently.",
+                if last_text.trim().is_empty() { String::new() } else { format!("{last_text}\n\n") }
+            );
+            return Ok((note, messages));
         }
     }
     // The budget ran out mid-work, not mid-answer — bailing here used to
@@ -232,10 +316,63 @@ pub async fn run_agent(
     } else {
         last_text
     };
-    if announce_done {
-        let _ = env.events.send(AgentEvent::Done { summary: note.clone() });
+    Ok((note, messages))
+}
+
+#[derive(Default)]
+struct LoopGuard {
+    last: Option<u64>,
+    run: u32,
+}
+
+#[derive(Debug, PartialEq)]
+enum LoopVerdict {
+    Fine,
+    Warn(u32),
+    Stop,
+}
+
+impl LoopGuard {
+    const WARN_AT: u32 = 3;
+    const STOP_AT: u32 = 5;
+
+    fn see(&mut self, name: &str, input: &Value, output: &str) -> LoopVerdict {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (name, input.to_string(), output).hash(&mut h);
+        let sig = h.finish();
+        if self.last == Some(sig) {
+            self.run += 1;
+        } else {
+            self.last = Some(sig);
+            self.run = 1;
+        }
+        match self.run {
+            n if n >= Self::STOP_AT => LoopVerdict::Stop,
+            n if n >= Self::WARN_AT => LoopVerdict::Warn(n),
+            _ => LoopVerdict::Fine,
+        }
     }
-    Ok(note)
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::*;
+
+    #[test]
+    fn repeats_warn_then_stop_and_any_change_resets() {
+        let mut g = LoopGuard::default();
+        let i = json!({"program": "npm", "args": ["test"]});
+        assert_eq!(g.see("run_command", &i, "fail"), LoopVerdict::Fine);
+        assert_eq!(g.see("run_command", &i, "fail"), LoopVerdict::Fine);
+        assert_eq!(g.see("run_command", &i, "fail"), LoopVerdict::Warn(3));
+        // a different result is progress, not a loop
+        assert_eq!(g.see("run_command", &i, "pass"), LoopVerdict::Fine);
+        for _ in 0..4 {
+            g.see("read_file", &json!({"path": "a"}), "x");
+        }
+        assert_eq!(g.see("read_file", &json!({"path": "a"}), "x"), LoopVerdict::Stop);
+    }
 }
 
 /// Context metering: prefer real provider-reported input tokens when we have
@@ -251,80 +388,92 @@ fn report_context(
     let _ = events.send(AgentEvent::Context { used, limit });
 }
 
+/// Codex's project doc: AGENTS.md at the workspace root is the repo's own
+/// standing instructions, read into every conversation. CLAUDE.md is the
+/// fallback so a repo set up for another agent still gets its rules.
+/// Capped like Codex's `project_doc_max_bytes`.
+pub fn project_doc(ws: &WorkspaceRoot) -> String {
+    const MAX: usize = 32 * 1024;
+    for name in ["AGENTS.md", "CLAUDE.md"] {
+        let Ok(mut text) = std::fs::read_to_string(ws.root().join(name)) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        if text.len() > MAX {
+            let mut cut = MAX;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            text.push_str("\n[… truncated]");
+        }
+        return format!(
+            "\n\n# Project instructions ({name})\nThe repository's own rules. Follow them; they \
+             override the general guidance above where they disagree.\n\n{text}"
+        );
+    }
+    String::new()
+}
+
 fn system_prompt(role: AgentRole, ws: &WorkspaceRoot) -> String {
     // The orientation block matters: without it the agent guessed the stack from the
     // tool names and described files that were never in the open folder.
     let common = format!(
-        "You are a coding agent. The user opened one local folder; that is the only workspace. \
-Paths are relative to the workspace root. You CAN run commands with run_command: foreground \
-calls wait up to 120s and suit installs, builds, tests and one-shot checks; pass background:true \
-for dev servers or watchers so they keep running after you reply, with their output streaming to \
-the terminal panel. Do not start the same background job twice. A dev server prints the URL and \
-port it actually bound to — read it from that output and use it. Never assume the default port: \
-it moves when the port is busy (Next falls back to 3001), so checking the wrong one reports a \
-server that is not yours. \
-Reading costs more than anything else you do, so read like someone paying for it. \
-Find the place first with search_files, then read_file with offset and limit around it. \
-Read a whole file only when you are about to rewrite it whole. Never open every file in a \
-folder to 'get oriented' — decide from the file list and one search which two or three \
-actually matter. Read each file once: its contents stay in this conversation, and asking \
-again returns a one-line note, not the file. \
-Never restate a file's contents, a diff, or a code block in your reasoning. The code is \
-already in the conversation; repeating it there is pure waste and it is not shown to the user. \
-Think in short notes to yourself, not in code. \
-If a skill covers the work you are about to do, load it first and follow it — when a \
-`ponytail` skill is listed, load it before writing any code and apply it. \
-Answer questions about this machine by running the command, never by refusing: the date and \
-time, tool versions, disk contents and git state are all one run_command away. \
-Do the task the user actually asked for and stop. 'Start the app' means start it — not install, \
-not build, not lint, not test. Run extra commands only when the task needs them or something \
-failed. \
-You have internet access through web_search (find pages) and web_fetch (read one page); prefer \
-official docs over blog guesses and never fabricate a URL. Use search_files to locate code by \
-content instead of reading files one by one. Edits must be minimal; edit_file replaces exact \
-text and refuses to overwrite an existing file without an exact match. Never dump \
-chain-of-thought, tool traces, or README paste into the user reply. \
-The reply answers what was asked and nothing else: no exit codes, no check_code/run_tests \
-narration unless something actually failed, no recap of which tools you called, no restating \
-the task back. If a check did fail, or you left part of the ask undone, say so in a sentence \
-— silence there is worse than noise.\n\n{}",
-        crate::project::summary(ws)
+        "You are a coding agent working in the user's local folder; that folder is the only \
+workspace and paths are relative to it. Keep going until the task is fully done before you \
+reply — do not stop at a plan or hand back work you could do yourself.\n\
+\n\
+Workflow:\n\
+- Questions about the code: investigate (search_files, then read_file with offset/limit around \
+the hit) and answer, citing files. Do not edit anything for a question.\n\
+- Changes: for anything with more than two steps, write the plan with todo_write first and keep \
+it updated as you go. Edit with edit_file (exact old_text, unique in the file) or write_file for \
+new files. Put file contents straight into the edit call — never draft them in prose first.\n\
+- Bugs: localize before editing — narrow from file to function to line with search_files and \
+ranged reads. When it is cheap, reproduce the bug first (a command or a small test), fix it, then \
+run the reproduction again to show it is gone.\n\
+- Verify code changes with check_code, and run_tests when the project has tests. A task that only \
+runs or inspects something is done when it has run.\n\
+- Parallel work: independent read-only lookups in one turn run concurrently. For big jobs, \
+spawn_agent several subagents (explore to map code, scout for docs, general for a separate \
+chunk of work), keep working, then wait_agent. Never give two agents the same file.\n\
+\n\
+Commands: run_command foreground calls suit installs, builds, tests and one-shot checks; pass \
+background:true for dev servers and watchers so they keep running, with output in the terminal \
+panel. Do not start the same background job twice. A dev server prints the port it actually bound \
+— read it from the output; never assume the default (Next falls back to 3001 when 3000 is busy). \
+Answer questions about this machine (date, versions, git state) by running the command.\n\
+\n\
+Reading is the expensive part: find the place first, read ranges, read each file once — its \
+contents stay in this conversation. Use web_search/web_fetch for docs; prefer official sources and \
+never invent a URL. If a skill covers the work, load it first and follow it; when a `ponytail` \
+skill is listed, load it before writing code.\n\
+\n\
+Final reply: short and in the user's terms — what changed and where, or the answer. No tool \
+narration, no restating the task, no pasted file contents. If a check failed or part of the ask \
+is undone, say so plainly.\n\n{}{}",
+        crate::project::summary(ws),
+        project_doc(ws),
     );
     match role {
         AgentRole::Planner => format!(
-            "{common}\nYou are the planner. If the user is greeting or chatting, reply in one short sentence and stop — no tools, no plan. \
-Otherwise read the repo as needed, then output a short numbered plan. Do not edit files. \
-Never tell the user what you cannot do: a coder with a terminal runs right after you and \
-carries out the plan, so 'I can't run commands' is wrong and confusing. Plan the command; \
-do not hand it back for the user to type."
+            "{common}\n\nYou are in plan mode: you cannot edit files or run commands. Investigate, \
+then give a short numbered plan naming the exact files and changes. For a plain question, just \
+answer it. Say what you would do, not what you are unable to do — the user switches to Auto to \
+have it carried out."
         ),
         AgentRole::Coder => format!(
-            "{common}\nYou are the coder. Write the change — a turn that reads and plans but \
-edits nothing has failed, however good the explanation. File contents never belong in your \
-reasoning or your reply: the moment you know what a file should say, put it in a write_file or \
-edit_file call. Drafting it in prose first spends the turn twice and often leaves the run with \
-nothing written at all. Edit as you go rather than reading everything first — the early files \
-teach you more than the later reads do. Carry out the plan. Only *code changes* get \
-check_code and run_tests afterwards — a task that runs or inspects something is finished when \
-it has run, and following it with a build or test suite wastes the user's time. A project with \
-no test suite is not a problem to solve: run_tests says so, and you move on. Always close with \
-a short plain sentence — ending your turn on a tool call leaves the user staring at nothing. \
-Reply with the result in the user's terms — what behaves differently now and which files \
-carry it; for a command, what it did and the URL or output that matters. They asked about \
-their code, not about your process."
+            "{common}\n\nYou are the build agent with full tools. Do the work end to end."
         ),
         AgentRole::Reviewer => format!(
-            "{common}\nYou are the reviewer. Inspect changed files with read_file. \
-If no files were changed — the task only ran or inspected something — reply APPROVED at once \
-and run nothing. Otherwise run check_code, and run_tests only when this project actually has a \
-suite: run_tests answers 'nothing to run' when it has none, and that is an answer, not a \
-failure to fix or retry. If a check fails, say REVISE and list exact fixes; if it passes, say \
-APPROVED and a one-line summary."
+            "{common}\n\nYou are reviewing changes another agent made. Read only the changed \
+files. Start with APPROVED or REVISE; for REVISE list exact fixes."
         ),
         AgentRole::Single => format!(
-            "{common}\nYou are chatting in the IDE and can use tools directly. Shell commands \
-             need the user's approval first; if they decline one, do not retry — adapt. \
-             Reply like a person. If they say hi or small-talk, greet them and ask what to work on."
+            "{common}\n\nShell commands need the user's approval first; if they decline one, do \
+not retry it — adapt. If the user is just chatting, reply like a person and ask what to work on."
         ),
     }
 }

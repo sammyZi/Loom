@@ -1,7 +1,7 @@
 // node lib/log.test.mjs — checks the NO_CODE marker never survives into the transcript.
 import assert from "node:assert/strict";
 
-const { mergeLog, toolLabel, groupLog } = await import("./log.ts");
+const { mergeLog, toolLabel, groupLog, summarizeTools, attachDiff } = await import("./log.ts");
 
 // marker split across streamed deltas, the case render-time stripping missed
 let log = [];
@@ -34,7 +34,7 @@ assert.deepEqual(toolLabel("run_command", { program: "npm", args: ["test", "-s"]
   text: "Ran",
   detail: "npm test -s",
 });
-assert.equal(toolLabel("list_files", {}).text, "list_files");
+assert.equal(toolLabel("some_new_tool", {}).text, "some_new_tool");
 
 // consecutive tool calls fold into one group, other items break the run
 const groups = groupLog([
@@ -45,6 +45,24 @@ const groups = groupLog([
 ]);
 assert.equal(groups.length, 3);
 assert.equal(groups[1].items.length, 2);
+
+// tool group summaries say what happened, not "Ran N commands" for everything
+{
+  const T = (text, detail = "") => ({ kind: "tool", text, detail });
+  assert.equal(summarizeTools([T("Read", "a.ts"), T("Read", "b.ts")]), "Read 2 files");
+  assert.equal(summarizeTools([T("Read", "a.ts"), T("Edited", "a.ts")]), "Read and edited a.ts");
+  assert.equal(
+    summarizeTools([T("Read", "a.ts"), T("Edited", "b.ts"), T("Ran", "npm test"), T("Searched", "x")]),
+    "Read a.ts, edited b.ts, ran a command, used 1 tool",
+  );
+  assert.equal(summarizeTools([T("Ran", "a"), T("Ran", "b")]), "Ran 2 commands");
+  // a diff lands on the newest tool row and accumulates
+  let l = [T("Edited", "a.ts"), { kind: "token", text: "x" }];
+  l = attachDiff(l, ["--- a", "+++ b", "+one", "+two", "-old"].join("\n"));
+  l = attachDiff(l, "+three");
+  assert.deepEqual([l[0].add, l[0].del], [3, 1]);
+  assert.equal(attachDiff([{ kind: "token", text: "x" }], "+a").length, 1, "no tool row: unchanged");
+}
 
 console.log("log: all checks passed");
 

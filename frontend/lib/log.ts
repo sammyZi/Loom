@@ -14,6 +14,9 @@ export type LogItem = {
   images?: string[];
   revert?: Record<string, string | null>;
   reverted?: boolean;
+  /** Lines this edit added / removed, for the +N −M chip on a tool group. */
+  add?: number;
+  del?: number;
 };
 
 /**
@@ -37,10 +40,37 @@ export function toolLabel(name: string, input: unknown): { text: string; detail:
       return { text: "Checked code", detail: "" };
     case "run_tests":
       return { text: "Ran tests", detail: "" };
+    case "write_file":
+      return { text: "Wrote", detail: baseName(path) };
+    case "list_files":
+      return { text: "Listed", detail: path || "." };
+    case "search_files":
+      return { text: "Searched", detail: str(o.query) };
+    case "web_search":
+      return { text: "Searched the web", detail: str(o.query) };
+    case "web_fetch":
+      return { text: "Fetched", detail: str(o.url) };
+    case "todo_write":
+      return { text: "Updated the plan", detail: "" };
+    case "task":
+      return { text: `Asked ${str(o.agent) || "a"} agent`, detail: clip(str(o.prompt)) };
+    case "spawn_agent":
+      return { text: `Started ${str(o.agent) || "a"} agent`, detail: clip(str(o.prompt)) };
+    case "wait_agent":
+      return { text: "Waiting for agents", detail: "" };
+    case "close_agent":
+      return { text: "Stopped agent", detail: str(o.id) };
+    case "skill":
+      return { text: "Loaded skill", detail: str(o.name) };
+    case "browser_open":
+      return { text: "Opened", detail: str(o.url) };
     default:
       return { text: name, detail: "" };
   }
 }
+const str = (v: unknown) => (typeof v === "string" ? v : "");
+const clip = (s: string) => (s.length > 80 ? `${s.slice(0, 80)}…` : s);
+
 export type ToolGroup = { kind: "tools"; items: LogItem[] };
 export type Group = LogItem | ToolGroup;
 
@@ -131,6 +161,48 @@ export function groupLog(log: LogItem[]): Group[] {
     else out.push({ kind: "tools", items: [l] });
   }
   return out;
+}
+
+/** Credit a file diff to the edit that produced it: the newest tool row. */
+export function attachDiff(log: LogItem[], diff: string): LogItem[] {
+  let i = log.length - 1;
+  while (i >= 0 && log[i].kind !== "tool") i--;
+  if (i < 0) return log;
+  const { add, del } = countDiff(diff);
+  const copy = log.slice();
+  copy[i] = { ...copy[i], add: (copy[i].add ?? 0) + add, del: (copy[i].del ?? 0) + del };
+  return copy;
+}
+
+/**
+ * One line for a folded tool group, Claude Code style: "Read App.tsx, edited
+ * 2 files, ran a command". It used to say "Ran N commands" for everything,
+ * including groups that only read files.
+ */
+export function summarizeTools(items: LogItem[]): string {
+  const files = (verbs: string[]) => items.filter((t) => verbs.includes(t.text));
+  const reads = files(["Read"]);
+  const edits = files(["Edited", "Wrote"]);
+  const runs = files(["Ran"]).length;
+  const other = items.length - reads.length - edits.length - runs;
+  const names = (xs: LogItem[]) => [...new Set(xs.map((x) => x.detail || ""))];
+  const what = (xs: LogItem[]) => {
+    const n = names(xs);
+    return n.length === 1 && n[0] ? n[0] : `${n.length} files`;
+  };
+  const parts: string[] = [];
+  const r = names(reads);
+  const e = names(edits);
+  if (r.length === 1 && e.length === 1 && r[0] === e[0] && r[0]) {
+    parts.push(`read and edited ${r[0]}`);
+  } else {
+    if (reads.length) parts.push(`read ${what(reads)}`);
+    if (edits.length) parts.push(`edited ${what(edits)}`);
+  }
+  if (runs) parts.push(runs === 1 ? "ran a command" : `ran ${runs} commands`);
+  if (other) parts.push(`used ${other} tool${other === 1 ? "" : "s"}`);
+  const line = parts.join(", ");
+  return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
 export function countDiff(diff: string) {

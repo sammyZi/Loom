@@ -2347,6 +2347,7 @@ dependencies = [
  "anyhow",
  "ide_core",
  "sandbox",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

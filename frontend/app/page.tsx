@@ -22,6 +22,7 @@ import {
 } from "@/lib/api";
 import {
   appendLog,
+  attachDiff,
   baseName,
   countDiff,
   errText,
@@ -134,6 +135,7 @@ export default function Page() {
   // The agent's plan for a multi-step job. Cleared per run, not per turn, so it
   // survives the tool calls in between.
   const [todos, setTodos] = useState<import("@/lib/api").TodoItem[]>([]);
+  const [agents, setAgents] = useState<import("@/lib/api").SubagentInfo[]>([]);
   // What the Browser panel is showing. Owned here so the agent can drive it.
   const [browserUrl, setBrowserUrl] = useState("");
   // Archived chats view in the sidebar.
@@ -377,6 +379,15 @@ export default function Page() {
     if (ev.type === "todos") {
       setTodos(ev.items);
     }
+    if (ev.type === "subagent") {
+      const { id, agent, status, summary } = ev;
+      setAgents((prev) => {
+        const i = prev.findIndex((a) => a.id === id);
+        // A finish keeps the task text unless it brought an answer line.
+        const next = { id, agent, status, summary: summary || prev[i]?.summary || "" };
+        return i < 0 ? [...prev, next] : prev.map((a, j) => (j === i ? next : a));
+      });
+    }
     if (ev.type === "browse") {
       // Show the agent's work without stealing the panel if the user is
       // deliberately looking at the terminal or the diff.
@@ -397,7 +408,11 @@ export default function Page() {
       streamed.current += ev.text.length;
       setTokens(exact.current + Math.round(streamed.current / 4));
     }
-    if (ev.type === "diff") scheduleRefresh();
+    if (ev.type === "diff") {
+      scheduleRefresh();
+      const d = ev.diff;
+      setLog((prev) => attachDiff(prev, d));
+    }
     const line = formatEvent(ev);
     if (line) setLog((prev) => mergeLog(prev, line));
     if (ev.type === "done") {
@@ -405,9 +420,13 @@ export default function Page() {
       // to leave an empty summary line, which groupLog then drops entirely —
       // the feed just stopped with no sign the run was ever done.
       const text = ev.summary.trim() || "Done.";
-      setLog((prev) =>
-        prev.some((l) => l.kind === "token") ? prev : [...prev, { kind: "ok", text }],
-      );
+      setLog((prev) => {
+        const lastUserIdx = prev.map((l) => l.kind).lastIndexOf("user");
+        const currentTurnHasToken = prev
+          .slice(lastUserIdx >= 0 ? lastUserIdx : 0)
+          .some((l) => l.kind === "token");
+        return currentTurnHasToken ? prev : [...prev, { kind: "ok", text }];
+      });
     }
     // Arrives after Done, once the run has actually settled server-side —
     // attach the "undo this message" snapshot to this run's reply. Saved
@@ -559,6 +578,7 @@ export default function Page() {
     }
     // Last run's plan is not this run's plan.
     setTodos([]);
+    setAgents([]);
 
     // meta.model is already a full "provider/model" selection.
     const id = meta.model || catalog?.default || "deepseek/deepseek-chat";
@@ -567,7 +587,7 @@ export default function Page() {
 
     // The mode is a real request field, never a prompt preamble: prefixing the
     // prompt defeated the backend's "is this just a greeting?" check and sent
-    // plain hellos through the whole planner/coder pipeline.
+    // plain hellos through the full agent loop instead of the greeting path.
     const mode = meta.mode || "Auto";
     const effort = (meta.effort || "Medium").toLowerCase();
     // Sent to the backend, which saves each into the workspace (so the agent's
@@ -751,6 +771,18 @@ export default function Page() {
           onSaved={setCatalog}
         />
       )}
+      <TopBar
+        title={title}
+        project={project}
+        sideOpen={sideOpen}
+        sideW={sideW}
+        panel={panel}
+        live={connected}
+        onShowSide={toggleSide}
+        onPanel={setPanel}
+        onOpenFolder={() => setShowPicker(true)}
+        onSettings={() => setSettingsOpen(true)}
+      />
       <div
         className="work"
         style={{ ["--side-w" as string]: `${sideW}px`, ["--panel-w" as string]: `${panelW}px` }}
@@ -817,16 +849,6 @@ export default function Page() {
         )}
 
         <main className="center">
-          <TopBar
-            title={title}
-            project={project}
-            sideOpen={sideOpen}
-            panel={panel}
-            live={connected}
-            onShowSide={toggleSide}
-            onPanel={setPanel}
-          />
-
           <Feed
             prompt={promptShown}
             log={log}
@@ -835,6 +857,7 @@ export default function Page() {
             elapsed={elapsed}
             tokens={tokens}
             todos={todos}
+            agents={agents}
             pending={pendingAsk}
             onDecide={decideAsk}
             onRevert={revertMessage}

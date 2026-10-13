@@ -220,12 +220,12 @@ body.dragging-col {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: 0 10px 8px;
-  padding: 6px 9px;
+  margin: 2px 10px 6px;
+  padding: 7px 10px;
   border-radius: 8px;
   background: var(--bg);
   color: var(--muted);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
 }
 .side-search:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 /* The generic .side-foot/.icon-btn svg rules were sizing this at 14–15px, which
@@ -511,10 +511,10 @@ body.dragging-col {
 /* The raw model id, right-aligned and quiet: gateways list many near-identical
    display names, and the id is what actually distinguishes them. */
 .picker-id {
-  margin-left: auto;
-  flex: 0 1 auto;
+  display: block;
   min-width: 0;
-  max-width: 11rem;
+  max-width: 100%;
+  line-height: 1.3;
   overflow: hidden;
   white-space: nowrap;
   font-size: 10px;
@@ -602,7 +602,7 @@ body.dragging-col {
 .feed-col {
   flex: 1 0 auto;
   width: 100%;
-  max-width: 780px;
+  max-width: 860px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -621,16 +621,20 @@ body.dragging-col {
 .feed-empty .brand-mark { width: 24px; height: 24px; color: var(--border-2); }
 .feed-empty p { margin: 0; font-size: 13.5px; max-width: 32ch; line-height: 1.6; }
 
-.user-row { display: flex; flex-direction: column; align-items: flex-end; margin: 14px 0 22px; }
+/* Claude Code style: the prompt is a full-width card the reply reads under,
+   not a chat bubble pushed to the right. */
+.user-row { display: flex; flex-direction: column; align-items: stretch; margin: 14px 0 18px; }
 .user-bubble {
-  max-width: 80%;
   overflow-wrap: anywhere;
-  background: var(--panel);
-  border-radius: 14px;
-  padding: 11px 16px;
+  white-space: pre-wrap;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  padding: 12px 16px;
   font-size: 14.5px;
   line-height: 1.55;
 }
+.user-actions { align-self: flex-end; }
 .user-actions { margin-top: 4px; opacity: 0; transition: opacity 0.14s; }
 .user-row:hover .user-actions { opacity: 1; }
 .user-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
@@ -723,6 +727,19 @@ body.dragging-col {
 }
 .work-group[open] > summary::after { transform: rotate(135deg); }
 .work-group > summary:hover { color: var(--text-2); }
+/* +N −M on a folded tool row: what the edits in it changed. */
+.diff-chip {
+  display: inline-flex;
+  gap: 5px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--bg-2);
+  font-family: var(--font-mono), ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.diff-chip .add { color: var(--ok); }
+.diff-chip .del { color: var(--danger); }
 .work-items {
   margin: 10px 0 0 2px;
   padding-left: 14px;
@@ -749,7 +766,9 @@ body.dragging-col {
 .composer-wrap {
   flex-shrink: 0;
   width: 100%;
-  max-width: 828px;
+  /* 860px of content, the feed column's width: the prompt, the repo bar and
+     the transcript share one edge, as in Claude Code. */
+  max-width: 908px;
   margin: 0 auto;
   padding: 4px 24px 18px;
 }
@@ -1338,13 +1357,12 @@ body.dragging-col {
 /* ---------- floating PromptInput ---------- */
 .composer-shell { display: flex; justify-content: center; }
 /* Matches the composer's own width so the two read as one stack. */
-.composer-wrap .ctx { max-width: 640px; margin: 0 auto 10px; }
+.composer-wrap .ctx { margin: 0 0 8px; }
 .ctx-repo, .ctx-branch { flex: none; }
 
 /* Messages sent while a run was busy, waiting their turn. */
 .queue-strip {
-  max-width: 640px;
-  margin: 0 auto 8px;
+  margin: 0 0 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2172,3 +2190,260 @@ body.dragging-col {
     animation: none;
   }
 }
+
+/* ANSI colours in terminal output (SGR 30–37 / 90–97), tuned for the dark
+   terminal surface. */
+.ansi-b { font-weight: 700; }
+.ansi-30, .ansi-90 { color: #8b8b86; }
+.ansi-31 { color: #f0716f; } .ansi-91 { color: #ff9592; }
+.ansi-32 { color: #4cc38a; } .ansi-92 { color: #7ee2a8; }
+.ansi-33 { color: #e5c06a; } .ansi-93 { color: #f5d98b; }
+.ansi-34 { color: #6aa8f0; } .ansi-94 { color: #9cc4f5; }
+.ansi-35 { color: #c792ea; } .ansi-95 { color: #ddb3f5; }
+.ansi-36 { color: #5fc9d6; } .ansi-96 { color: #8fe0ea; }
+.ansi-37 { color: #d6d6d0; } .ansi-97 { color: #ffffff; }
+.agents { border-left-color: var(--accent-hi, #6aa8f0); }
+
+/* ======================================================================
+   Claude Code skin. Kept as one block at the end so it wins over the rules
+   above without editing each of them: neutral dark palette, a window-wide
+   title bar, quiet sidebar rows, a centred reading column, and a one-line
+   composer with its controls underneath.
+   ====================================================================== */
+:root {
+  --bg: #1f1f1e;
+  --bg-2: #1a1a19;
+  --panel: #2b2b29;
+  --card: #262624;
+  --hover: #2a2a28;
+  --border: #2f2f2c;
+  --border-2: #3e3e3a;
+  --text: #ecebe6;
+  --text-2: #c9c7c0;
+  --muted: #9b998f;
+  --faint: #6f6d66;
+  --ok: #6fbf73;
+  --ok-soft: rgba(111, 191, 115, 0.16);
+  --danger: #e5786d;
+  --danger-soft: rgba(229, 120, 109, 0.16);
+}
+body, .app { background: var(--bg); }
+
+/* ---------- title bar ---------- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  flex-shrink: 0;
+  background: var(--bg);
+}
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 14px;
+  flex-shrink: 0;
+}
+.titlebar-mark { display: grid; place-items: center; margin-right: 4px; }
+.titlebar-mark .brand-mark { width: 16px; height: 16px; color: var(--accent-hi); }
+.titlebar-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 0 18px;
+}
+.titlebar .topbar-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.titlebar .chip {
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text-2);
+  border: 0;
+}
+.titlebar .icon-btn { width: 30px; height: 30px; color: var(--text-2); }
+.titlebar .icon-btn svg { width: 16px; height: 16px; }
+.titlebar .icon-btn.on { background: var(--panel); color: var(--text); }
+
+/* ---------- sidebar ---------- */
+.sidebar { background: var(--bg); padding-top: 2px; }
+.side-search {
+  margin: 4px 10px 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+}
+.side-search input { font-size: 13.5px; }
+.side-search input::placeholder { color: var(--muted); }
+.side-nav { padding: 0 8px 10px; gap: 0; }
+.side-nav button {
+  font-size: 14px;
+  font-weight: 450;
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+.side-nav button svg { color: var(--text-2); }
+.side-nav button:hover { background: var(--hover); }
+/* Skills / Archived read as nav rows ("More" in Claude Code), not headers. */
+.proj.proj-archived { border: 0 !important; margin: 0 8px; padding: 0; }
+.proj-archived .arch-toggle { display: flex; align-items: center; gap: 10px; }
+/* Chevron after the label, small, like Claude Code's expandable rows. */
+.proj-archived .proj-chev { order: 3; margin-left: auto; width: 13px; height: 13px; color: var(--faint); }
+.proj-archived .arch-ico { width: 15px; height: 15px; color: var(--text-2); }
+.proj-archived .proj-head { padding: 0; }
+.proj-archived .arch-toggle {
+  font-size: 14px;
+  font-weight: 450;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 8px;
+  width: 100%;
+}
+.side-scroll { padding-top: 10px; }
+.proj { margin-bottom: 10px; }
+.proj-head { padding: 0 8px 2px 14px; }
+.proj-name {
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.proj:not(.proj-archived) .proj-chev { display: none; }
+.proj-add { opacity: 0.85; }
+.sess {
+  margin: 1px 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+.sess:hover { background: var(--hover); }
+.sess.on { background: var(--panel); color: var(--text); }
+/* Idle sessions are hollow rings; the live one is filled. */
+.dot { width: 7px; height: 7px; }
+.dot.off { background: none; box-shadow: inset 0 0 0 1.3px var(--faint); }
+
+/* footer: identity row with a menu, settings on the right */
+.side-foot { padding: 8px 10px 10px; border-top: 0; }
+.side-foot-row { align-items: center; }
+.foot-who-wrap { position: relative; flex: 1; min-width: 0; }
+.foot-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+}
+.foot-who:hover { background: var(--hover); }
+.foot-avatar {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.foot-name { font-weight: 550; }
+.foot-plan { color: var(--muted); font-size: 13px; }
+.foot-chev { width: 14px; height: 14px; color: var(--muted); transform: rotate(90deg); transition: transform 0.15s; }
+.foot-chev.up { transform: rotate(-90deg); }
+.foot-gear { border: 0; width: 30px; height: 30px; }
+.menu.menu-up { top: auto; bottom: 100%; left: 0; right: auto; margin: 0 0 6px; min-width: 200px; }
+.menu .menu-ico { width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px; }
+
+/* ---------- feed ---------- */
+.feed { padding: 6px 24px 4px; }
+.feed-col { max-width: 768px; }
+.event { font-size: 15px; line-height: 1.65; font-weight: 400; }
+.user-row { margin: 18px 0 16px; }
+.user-bubble {
+  background: var(--card);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 15px;
+}
+.work-group { margin: 2px 0 14px; }
+.work-group > summary { font-size: 14.5px; color: var(--muted); gap: 8px; }
+.work-group > summary:hover { color: var(--text-2); }
+/* Claude Code tints each half of the stat separately. */
+.diff-chip { background: none; padding: 0; gap: 3px; font-size: 11.5px; }
+.diff-chip .add, .diff-chip .del { padding: 1px 5px; border-radius: 4px; }
+.diff-chip .add { background: var(--ok-soft); }
+.diff-chip .del { background: var(--danger-soft); }
+.md code:not(pre code) {
+  color: #e8836f;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-size: 0.88em;
+}
+
+/* ---------- composer ---------- */
+.composer-wrap { max-width: 816px; padding: 4px 24px 12px; }
+.ctx {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  padding: 7px 14px;
+  margin: 0 0 8px !important;
+  font-family: var(--font-mono), ui-monospace, Consolas, monospace;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.ctx-stat { padding: 1px 6px; border-radius: 5px; background: var(--panel); }
+.composer-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 0 2px;
+  min-height: 30px;
+}
+.composer-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--text-2);
+}
+.composer-icon-btn:hover { background: var(--hover); color: var(--text); }
+.composer-icon-btn:disabled { opacity: 0.4; }
+.composer-controls > .relative > button { color: var(--text-2); font-size: 13px; }
+/* Model and effort sit at the right end now, so their menus open leftward
+   from the right edge instead of spilling out of the column. */
+.composer-controls .flex-1 ~ .relative > div.absolute {
+  left: auto;
+  right: 0;
+  transform-origin: bottom right !important;
+}
+
+/* The sidebar and the content share one background, so a hairline keeps
+   them apart; it runs on through the title bar for the full window height. */
+.sidebar { border-right: 1px solid var(--border-2); }
+.titlebar-left.with-side { align-self: stretch; border-right: 1px solid var(--border-2); }

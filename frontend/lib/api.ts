@@ -265,11 +265,16 @@ export type AgentEvent =
   /** Point the Browser panel at a URL. */
   | { type: "browse"; url: string }
   | { type: "usage"; tokens: number }
+  /** A background subagent (spawn_agent) changed state. */
+  | { type: "subagent"; id: string; agent: string; status: SubagentStatus; summary: string }
   | { type: "done"; summary: string }
   | { type: "error"; message: string }
   /** Every file this run wrote, mapped to what it held right before — `null`
    *  means the run created it. Backs the "Undo" button on this run's reply. */
   | { type: "snapshot"; files: Record<string, string | null> };
+
+export type SubagentStatus = "running" | "done" | "failed" | "closed";
+export type SubagentInfo = { id: string; agent: string; status: SubagentStatus; summary: string };
 
 export type TodoItem = { text: string; status: "pending" | "running" | "done" };
 
